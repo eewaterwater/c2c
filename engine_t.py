@@ -24,7 +24,7 @@ if not is_market_open_today and event_name == "schedule":
         f"⏸️ <b>[C2C Engine T - Market Closed]</b>\n"
         f"📅 <b>Date:</b> {bkk_date_str} (BKK)\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"• <b>Status:</b> SET / TFEX is closed today (Holiday/Weekend).\n"
+        f"• <b>Status:</b> SET / TFEX closed today (Holiday/Weekend).\n"
         f"• <b>Action:</b> Standing down. No scan executed.\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"<i>Automated pipeline running via GitHub Cloud.</i>"
@@ -61,7 +61,7 @@ if len(c_es) >= 2:
 long_es_pass = (es_pct > -0.60)
 short_es_pass = (es_pct < 0.60)
 
-# 2. USD/THB FX Gate (5-Day Trend Slope)
+# 2. USD/THB FX Gate
 thb_chg = 0.0
 c_thb = safe_get_series("THB=X", "10d", "1d")
 if len(c_thb) >= 5:
@@ -240,7 +240,6 @@ title_tag = "🚨 <b>[ACTION REQUIRED: TFEX S50 LONG]</b>" if is_long_authorized
     "⚡ <b>C2C ENGINE T // S50 INTELLIGENCE</b>"
 )
 
-# Clean formatted breadth tree
 b_row1 = f"  ├ {breadth_items[0]}  {breadth_items[1]}" if len(breadth_items) >= 2 else ""
 b_row2 = f"  ├ {breadth_items[2]}  {breadth_items[3]}" if len(breadth_items) >= 4 else ""
 b_row3 = f"  └ {breadth_items[4]}" if len(breadth_items) >= 5 else ""
@@ -279,14 +278,14 @@ if is_long_authorized:
         "📋 <b>INSTITUTIONAL MASTER TICKET (10 Contracts):</b>",
         f"• Order: <b>BUY OPEN 10 Contracts</b> (฿1.0M Baseline)",
         f"• Limit Entry: <b>{s50_price:.1f}</b> (In ZOI)",
-        f"• Hard Stop: <b>{s50_price - stop_distance:.1f}</b> (-{stop_distance} pts structural cap)",
-        f"• <b>Tranche 1 (Bank 4 cts):</b> Limit <b>{long_t1:.1f}</b> (+{long_t1-s50_price:.1f} pts &gt;&gt; Move stop to BE)",
+        f"• Hard Stop: <b>{s50_price - stop_distance:.1f}</b> (-{stop_distance} pts cap)",
+        f"• <b>Tranche 1 (Bank 4 cts):</b> Limit <b>{long_t1:.1f}</b> (+{long_t1-s50_price:.1f} pts >> BE)",
         f"• <b>Tranche 2A (Fixed 3 cts):</b> Limit <b>{long_t2a:.1f}</b> (+12.0 pts)",
-        f"• <b>Tranche 2B (Runner 3 cts):</b> Chandelier Trail &gt;&gt; High - {1.5*s50_atr:.1f} pts (Initial: <b>{chandelier_long:.1f}</b>)",
+        f"• <b>Tranche 2B (Runner 3 cts):</b> Chandelier Trail >> High - {1.5*s50_atr:.1f} pts (Initial: <b>{chandelier_long:.1f}</b>)",
         "━━━━━━━━━━━━━━━━━━",
         "🔥 <b>HOUSE MONEY PYRAMID TICKET (+2 Contracts):</b>",
-        f"• Trigger: After T1 banks (+{long_t1-s50_price:.1f} pts), place <b>BUY OPEN +2 cts</b> on next 15M breakout.",
-        f"• Anchor Stop: <b>{s50_price:.1f}</b> (Breakeven). 100% financed by T1 banked profit.",
+        f"• Trigger: After T1 banks (+{long_t1-s50_price:.1f} pts), BUY OPEN +2 cts on 15M breakout.",
+        f"• Anchor Stop: <b>{s50_price:.1f}</b> (Breakeven). Financed by T1 profit.",
         "━━━━━━━━━━━━━━━━━━",
         "📲 <b>QUICK ORDER:</b>",
         f"<code>BUY OPEN S50 10 cts @ {s50_price:.1f} | Stop: {s50_price - stop_distance:.1f}</code>"
@@ -295,4 +294,62 @@ elif is_short_authorized:
     lines.extend([
         "🎯 <b>REGIME STATUS: RED (SHORT AUTHORIZED)</b>",
         "📋 <b>INSTITUTIONAL MASTER TICKET (10 Contracts):</b>",
-        f"• Order: <b>SELL OPEN (SHORT) 10 Contracts</b>
+        f"• Order: <b>SELL OPEN (SHORT) 10 Contracts</b> (฿1.0M Baseline)",
+        f"• Limit Entry: <b>{s50_price:.1f}</b> (In ZOI)",
+        f"• Hard Stop: <b>{s50_price + stop_distance:.1f}</b> (+{stop_distance} pts cap)",
+        f"• <b>Tranche 1 (Bank 4 cts):</b> Limit <b>{short_t1:.1f}</b> (-4.5 pts >> BE)",
+        f"• <b>Tranche 2A (Fixed 3 cts):</b> Limit <b>{short_t2a:.1f}</b> (-14.0 pts impulse)",
+        f"• <b>Tranche 2B (Runner 3 cts):</b> Chandelier Trail >> Low + {1.5*s50_atr:.1f} pts (Initial: <b>{chandelier_short:.1f}</b>)",
+        "━━━━━━━━━━━━━━━━━━",
+        "🔥 <b>HOUSE MONEY PYRAMID TICKET (+2 Contracts):</b>",
+        f"• Trigger: After T1 banks (-4.5 pts), SELL OPEN +2 cts on 15M breakdown.",
+        f"• Anchor Stop: <b>{s50_price:.1f}</b> (Breakeven). Financed by T1 profit.",
+        "━━━━━━━━━━━━━━━━━━",
+        "📲 <b>QUICK ORDER:</b>",
+        f"<code>SELL OPEN S50 10 cts @ {s50_price:.1f} | Stop: {s50_price + stop_distance:.1f}</code>"
+    ])
+else:
+    reasons = []
+    if not zoi_pass: reasons.append("Price Extended Beyond ZOI (No Chasing)")
+    if not (long_delta_pass and short_delta_pass): reasons.append(f"DELTA Decoupler Asymmetry ({delta_chg:+.2f}%)")
+    if not (mss_15m_long or mss_15m_short): reasons.append("15M Market Structure Shift Neutral")
+    if not adx_pass: reasons.append(f"Daily ADX &lt; 20 ({daily_adx:.1f} Low Trend Momentum)")
+    if not (va_pass_long or va_pass_short): reasons.append("Trapped in Value Area Chop (VAH/VAL)")
+    if not basis_pass_long and not basis_pass_short: reasons.append("Futures Basis Clamped (Pricing Distortion)")
+    if not (long_breadth_pass or short_breadth_pass): reasons.append("Mega-Cap Breadth Fragmented")
+
+    veto_list = "\n".join([f"  ↳ {r}" for r in reasons])
+    lines.extend([
+        "⛔ <b>SYSTEM DIRECTIVE: STAND DOWN</b>",
+        "• <b>Veto Triggers:</b>",
+        veto_list if veto_list else "  ↳ Neutral Mean-Reversion Band",
+        "• <b>Mandate:</b> Preserve capital. Zero high-probability edge."
+    ])
+
+lines.append("━━━━━━━━━━━━━━━━━━\n<i>Automated pipeline running via GitHub Cloud.</i>")
+full_msg = "\n".join(lines)
+
+keyboard = {
+    "inline_keyboard": [
+        [
+            {"text": "📈 S50 Futures Chart", "url": "https://www.tradingview.com/chart/?symbol=TFEX%3AS501!"},
+            {"text": "📲 Open InnovestX", "url": "https://play.google.com/store/apps/details?id=com.scbs.easyinvest"}
+        ]
+    ]
+}
+
+if token and chat_id:
+    res = requests.post(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        json={
+            "chat_id": chat_id,
+            "text": full_msg,
+            "parse_mode": "HTML",
+            "disable_notification": is_silent,
+            "reply_markup": keyboard
+        },
+        timeout=15
+    )
+    print(f"Telegram status: {res.status_code}")
+else:
+    print("Missing Telegram credentials.")
