@@ -2,8 +2,10 @@ name: C2C Engine T (TFEX Scheduled Scanner)
 
 on:
   schedule:
-    - cron: '45 4 * * 1-5'   # 11:45 AM BKK
-    - cron: '15 7 * * 1-5'   # 02:15 PM BKK
+    # 04:45 UTC = 11:45 AM Bangkok (Morning 2H Session Close)
+    - cron: '45 4 * * 1-5'
+    # 07:15 UTC = 02:15 PM Bangkok (Afternoon 2H Session Close)
+    - cron: '15 7 * * 1-5'
   workflow_dispatch:
 
 jobs:
@@ -18,40 +20,75 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install --upgrade pip
-          pip install requests yfinance pandas numpy pytz
+          pip install requests yfinance pandas numpy pytz exchange_calendars
 
       - name: Execute TFEX S50 Scan & Generate Tickets
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           python - << 'EOF'
           import os
+          import sys
           import requests
           from datetime import datetime
           import pytz
+          import exchange_calendars as xcals
           import yfinance as yf
           import pandas as pd
           import numpy as np
 
           token = os.environ.get("TELEGRAM_BOT_TOKEN")
           chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-          bkk_time = datetime.now(pytz.timezone("Asia/Bangkok")).strftime("%Y-%m-%d %H:%M:%S")
+          event_name = os.environ.get("EVENT_NAME", "workflow_dispatch")
+          bkk_now = datetime.now(pytz.timezone("Asia/Bangkok"))
+          bkk_date_str = bkk_now.strftime("%Y-%m-%d")
+          bkk_time_str = bkk_now.strftime("%Y-%m-%d %H:%M:%S")
 
+          # -------------------------------------------------------------
+          # 0. SET / TFEX Holiday Calendar Gate (XBKK)
+          # -------------------------------------------------------------
+          xbkk = xcals.get_calendar("XBKK")
+          is_market_open_today = xbkk.is_session(bkk_date_str)
+
+          # If scheduled cron fires on holiday/weekend: notify and stand down
+          if not is_market_open_today and event_name == "schedule":
+              msg = (
+                  f"⏸️ <b>[C2C Engine T - Market Closed]</b>\n"
+                  f"📅 <b>Date:</b> {bkk_date_str} (BKK)\n"
+                  f"━━━━━━━━━━━━━━━━━━\n"
+                  f"• <b>Status:</b> SET / TFEX is closed today (Holiday/Weekend).\n"
+                  f"• <b>Action:</b> Standing down. No scan executed.\n"
+                  f"━━━━━━━━━━━━━━━━━━\n"
+                  f"<i>Automated pipeline running via GitHub Cloud.</i>"
+              )
+              if token and chat_id:
+                  requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                                json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}, timeout=15)
+              sys.exit(0)
+
+          notice_header = ""
+          if not is_market_open_today:
+              notice_header = "⚠️ <b>[TEST MODE: SET Closed Today - Using Prior Close]</b>\n"
+
+          # -------------------------------------------------------------
+          # Helper Function for Safe Data Fetch
+          # -------------------------------------------------------------
           def safe_get_series(ticker, period="5d"):
               try:
                   df = yf.download(ticker, period=period, interval="1d", progress=False)
                   if df is not None and not df.empty:
                       if isinstance(df.columns, pd.MultiIndex):
-                          c = df["Close"].iloc[:, 0].dropna().values
-                      else:
-                          c = df["Close"].dropna().values
-                      return c
+                          return df["Close"].iloc[:, 0].dropna().values
+                      return df["Close"].dropna().values
               except Exception as e:
                   print(f"Warning {ticker}: {e}")
               return np.array([])
 
-          # 1. Asian E-mini S&P
+          # -------------------------------------------------------------
+          # 1. Asian E-mini S&P (ES=F)
+          # -------------------------------------------------------------
           es_veto = False
           es_pct = 0.0
           c_es = safe_get_series("ES=F", "5d")
@@ -60,7 +97,9 @@ jobs:
               if es_pct <= -0.60:
                   es_veto = True
 
+          # -------------------------------------------------------------
           # 2. USD/THB FX Gate
+          # -------------------------------------------------------------
           thb_veto = False
           thb_chg = 0.0
           c_thb = safe_get_series("THB=X", "10d")
@@ -69,7 +108,9 @@ jobs:
               if thb_chg > 0.30:
                   thb_veto = True
 
+          # -------------------------------------------------------------
           # 3. Breadth & DELTA Decoupler
+          # -------------------------------------------------------------
           tickers = ["DELTA.BK", "PTT.BK", "PTTEP.BK", "BDMS.BK", "CPALL.BK"]
           advancing = 0
           breadth_details = []
@@ -95,7 +136,9 @@ jobs:
           breadth_pass = (advancing >= 3)
           delta_veto = (delta_chg < -1.50)
 
-          # 4. S50 Approximation
+          # -------------------------------------------------------------
+          # 4. S50 Index Trend & ATR
+          # -------------------------------------------------------------
           s50_price = 930.0
           s50_ema20 = 925.0
           s50_atr = 4.5
@@ -110,16 +153,19 @@ jobs:
 
           all_pass = (not es_veto) and (not thb_veto) and breadth_pass and (not delta_veto) and daily_bullish
 
-          # HTML entity encoding: &lt; and &gt; prevent Telegram 400 Bad Request
           es_icon = "🔴 VETO" if es_veto else "🟢 PASS"
           thb_icon = "🔴 VETO" if thb_veto else "🟢 PASS"
           breadth_icon = "🟢 PASS" if breadth_pass else "🔴 VETO"
           delta_icon = "🔴 VETO" if delta_veto else "🟢 PASS"
           trend_icon = "🟢 BULL" if daily_bullish else "🔴 BEAR"
 
-          lines = [
+          lines = []
+          if notice_header:
+              lines.append(notice_header)
+
+          lines.extend([
               "⚡ <b>[C2C Engine T - TFEX S50 Scanner]</b>",
-              f"📅 <b>Time:</b> {bkk_time} BKK",
+              f"📅 <b>Time:</b> {bkk_time_str} BKK",
               "━━━━━━━━━━━━━━━━━━",
               f"📈 <b>SET50 Index:</b> {s50_price:.2f} pts [{trend_icon}]",
               f"• 20-day EMA: {s50_ema20:.2f} | 14-ATR: {s50_atr:.1f} pts",
@@ -131,7 +177,7 @@ jobs:
               f"• <b>DELTA Decoupler:</b> {delta_chg:+.2f}% [{delta_icon}]",
               "  " + " | ".join(breadth_details),
               "━━━━━━━━━━━━━━━━━━"
-          ]
+          ])
 
           if all_pass:
               lines.extend([
@@ -161,9 +207,10 @@ jobs:
           full_msg = "\n".join(lines)
 
           if token and chat_id:
-              url = f"https://api.telegram.org/bot{token}/sendMessage"
-              res = requests.post(url, json={"chat_id": chat_id, "text": full_msg, "parse_mode": "HTML"}, timeout=15)
-              print(f"Telegram status: {res.status_code}, response: {res.text}")
-          else:
-              print("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
+              res = requests.post(
+                  f"https://api.telegram.org/bot{token}/sendMessage",
+                  json={"chat_id": chat_id, "text": full_msg, "parse_mode": "HTML"},
+                  timeout=15
+              )
+              print(f"Telegram status: {res.status_code}")
           EOF
