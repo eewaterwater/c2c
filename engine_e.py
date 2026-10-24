@@ -177,13 +177,20 @@ if circuit_breaker_active:
     r_label = f"0.0R (HALTED: {circuit_reason})"
     risk_authorized = False
 
-# 5. Watchpool
+# 5. Watchpool (12 Core High-Beta & Healthcare Leaders)
 watchpool = [
-    {"ticker": "NVDA", "dr": "NVDA80X", "ratio": 200, "exchange": "NASDAQ"},
-    {"ticker": "PLTR", "dr": "PLTR01",  "ratio": 1100, "exchange": "NASDAQ"},
-    {"ticker": "TSLA", "dr": "TSLA80X", "ratio": 5000, "exchange": "NASDAQ"},
-    {"ticker": "AMD",  "dr": "AMD80X",  "ratio": 5000, "exchange": "NASDAQ"},
-    {"ticker": "SOXX", "dr": "SOXX23",  "ratio": 100, "exchange": "NASDAQ"}
+    {"ticker": "NVDA",  "dr": "NVDA80X", "ratio": 200,  "exchange": "NASDAQ"},
+    {"ticker": "PLTR",  "dr": "PLTR01",  "ratio": 1100, "exchange": "NASDAQ"},
+    {"ticker": "TSLA",  "dr": "TSLA80X", "ratio": 5000, "exchange": "NASDAQ"},
+    {"ticker": "AMD",   "dr": "AMD80X",  "ratio": 5000, "exchange": "NASDAQ"},
+    {"ticker": "AAPL",  "dr": "AAPL80X", "ratio": 1000, "exchange": "NASDAQ"},
+    {"ticker": "MSFT",  "dr": "MSFT80X", "ratio": 1000, "exchange": "NASDAQ"},
+    {"ticker": "GOOGL", "dr": "GOOG80X", "ratio": 500,  "exchange": "NASDAQ"},
+    {"ticker": "META",  "dr": "META80X", "ratio": 1000, "exchange": "NASDAQ"},
+    {"ticker": "AMZN",  "dr": "AMZN80X", "ratio": 500,  "exchange": "NASDAQ"},
+    {"ticker": "LLY",   "dr": "LLY80X",  "ratio": 1000, "exchange": "NYSE"},
+    {"ticker": "ISRG",  "dr": "ISRG80X", "ratio": 500,  "exchange": "NASDAQ"},
+    {"ticker": "SOXX",  "dr": "SOXX23",  "ratio": 100,  "exchange": "NASDAQ"}
 ]
 
 candidates = []
