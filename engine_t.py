@@ -39,7 +39,7 @@ if not is_market_open_today and event_name == "schedule":
 
 notice_header = ""
 if not is_market_open_today:
-    notice_header = "⚠️ <b>[TEST MODE: SET Closed Today - Using Prior Session Data]</b>\n"
+    notice_header = "⏸️ <b>[SET CLOSED — PRIOR SESSION AUDIT]</b>"
 
 def safe_get_series(ticker, period="5d", interval="1d"):
     try:
@@ -74,7 +74,7 @@ short_thb_pass = True
 tickers = ["DELTA.BK", "PTT.BK", "PTTEP.BK", "BDMS.BK", "CPALL.BK"]
 advancing = 0
 declining = 0
-breadth_details = []
+breadth_items = []
 delta_chg = 0.0
 
 for t in tickers:
@@ -86,14 +86,14 @@ for t in tickers:
             delta_chg = chg
         if chg > 0:
             advancing += 1
-            breadth_details.append(f"🟢 {clean}: {chg:+.2f}%")
+            breadth_items.append(f"🟢 {clean} {chg:+.2f}%")
         elif chg < 0:
             declining += 1
-            breadth_details.append(f"🔴 {clean}: {chg:+.2f}%")
+            breadth_items.append(f"🔴 {clean} {chg:+.2f}%")
         else:
-            breadth_details.append(f"⚪ {clean}: 0.00%")
+            breadth_items.append(f"⚪ {clean} 0.00%")
     else:
-        breadth_details.append(f"⚪ {clean}: Flat")
+        breadth_items.append(f"⚪ {clean} Flat")
 
 long_breadth_pass = (advancing >= 3)
 short_breadth_pass = (declining >= 3)
@@ -135,7 +135,6 @@ try:
             daily_bullish = s50_price >= s50_daily_ema20
             daily_bearish = s50_price < s50_daily_ema20
 
-            # Prior Day Value Area (VAH / VAL 70% Distribution)
             if len(h_vals) >= 2:
                 prev_h = h_vals[-2]
                 prev_l = l_vals[-2]
@@ -143,7 +142,6 @@ try:
                 prior_vah = prev_h - (prev_rng * 0.15)
                 prior_val = prev_l + (prev_rng * 0.15)
 
-            # ATR Calculation
             tr_list = []
             for k in range(1, len(c_vals)):
                 tr_val = max(h_vals[k] - l_vals[k], abs(h_vals[k] - c_vals[k-1]), abs(l_vals[k] - c_vals[k-1]))
@@ -151,7 +149,6 @@ try:
             if len(tr_list) >= 14:
                 s50_atr = max(float(np.mean(tr_list[-14:])), 3.5)
 
-            # Daily ADX(14)
             df_adx = pd.DataFrame({"High": h_vals, "Low": l_vals, "Close": c_vals})
             up = df_adx["High"].diff()
             down = -df_adx["Low"].diff()
@@ -204,13 +201,11 @@ except Exception:
 basis_pass_long = (basis_delta < 5.5)
 basis_pass_short = (basis_delta > -3.5)
 
-# Value Area & ZOI Acceptance Gates
 va_pass_long = (s50_price >= prior_vah)
 va_pass_short = (s50_price <= prior_val)
 zoi_pass = abs(s50_price - s50_daily_ema20) <= (s50_atr * 0.75)
 adx_pass = (daily_adx >= 20.0)
 
-# Unified Institutional Rule Matrix
 is_long_authorized = (
     long_es_pass and long_thb_pass and long_breadth_pass and long_delta_pass and
     daily_bullish and mss_15m_long and basis_pass_long and adx_pass and
@@ -228,39 +223,48 @@ is_silent = not has_actionable_signal
 
 trend_icon = "🟢 BULL" if daily_bullish else "🔴 BEAR"
 adx_icon = "🟢 TRENDING" if daily_adx >= 20.0 else "🟡 CHOP/FLAT"
-mss_icon = "🟢 BULL MSS" if mss_15m_long else ("🔴 BEAR MSS" if mss_15m_short else "⚪ NEUTRAL")
-basis_icon = "🟢 NORMAL" if (-3.5 < basis_delta < 5.5) else ("🔴 HIGH PREMIUM" if basis_delta >= 5.5 else "🔴 DEEP DISCOUNT")
+rsi_icon = "🟢 BULL MSS" if mss_15m_long else ("🔴 BEAR MSS" if mss_15m_short else "FLAT")
+basis_tag = "🟢 FAIR" if (-3.5 < basis_delta < 5.5) else ("🔴 HIGH PREMIUM" if basis_delta >= 5.5 else "🔴 DEEP DISCOUNT")
+
+es_tag = "🟢 CLEAR" if (long_es_pass if daily_bullish else short_es_pass) else "🔴 OPPOSING"
+thb_tag = "🟢 CLEAR" if long_thb_pass else "🔴 RAPID DEPREC"
+breadth_tag = "🟢 PASS" if (long_breadth_pass if daily_bullish else short_breadth_pass) else "🟢 NEUTRAL"
+delta_tag = "🔴 DRAG VETO" if delta_chg < -1.50 else ("🔴 PUMP VETO" if delta_chg > 1.50 and daily_bearish else "🟢 PASS")
 
 lines = []
 if notice_header:
     lines.append(notice_header)
 
-if is_long_authorized:
-    title_tag = "🚨 <b>[ACTION REQUIRED: TFEX S50 LONG]</b>"
-elif is_short_authorized:
-    title_tag = "🚨 <b>[ACTION REQUIRED: TFEX S50 SHORT]</b>"
-else:
-    title_tag = "⚡ <b>[C2C Engine T - Market Scan]</b>"
+title_tag = "🚨 <b>[ACTION REQUIRED: TFEX S50 LONG]</b>" if is_long_authorized else (
+    "🚨 <b>[ACTION REQUIRED: TFEX S50 SHORT]</b>" if is_short_authorized else
+    "⚡ <b>C2C ENGINE T // S50 INTELLIGENCE</b>"
+)
+
+# Clean formatted breadth tree
+b_row1 = f"  ├ {breadth_items[0]}  {breadth_items[1]}" if len(breadth_items) >= 2 else ""
+b_row2 = f"  ├ {breadth_items[2]}  {breadth_items[3]}" if len(breadth_items) >= 4 else ""
+b_row3 = f"  └ {breadth_items[4]}" if len(breadth_items) >= 5 else ""
 
 lines.extend([
     title_tag,
-    f"📅 <b>Time:</b> {bkk_time_str} BKK",
+    f"📅 <code>{bkk_time_str} BKK</code>",
     "━━━━━━━━━━━━━━━━━━",
-    f"📈 <b>SET50 Index:</b> {s50_price:.2f} pts [{trend_icon}]",
-    f"• Daily EMA(20): {s50_daily_ema20:.2f} | 15M EMA(20): {s50_15m_ema20:.2f}",
-    f"• ADX(14): {daily_adx:.1f} [{adx_icon}] | 15M RSI: {s50_rsi15m:.1f} [{mss_icon}]",
-    f"• Value Area: VAH {prior_vah:.1f} / VAL {prior_val:.1f} | Basis: {basis_delta:+.1f} pts [{basis_icon}]",
+    f"📈 <b>S50 CASH INDEX:</b> <b>{s50_price:.2f} pts</b> [{trend_icon} REGIME]",
+    f"• Structural 20-EMA: <b>{s50_daily_ema20:.2f}</b> | Fast 15M: <b>{s50_15m_ema20:.2f}</b>",
+    f"• Trend Strength: ADX <b>{daily_adx:.1f}</b> [{adx_icon}] | RSI <b>{s50_rsi15m:.1f}</b> [{rsi_icon}]",
+    f"• Auction Profile: VAH <b>{prior_vah:.1f}</b> / VAL <b>{prior_val:.1f}</b> | Basis: <b>{basis_delta:+.1f} pts</b> [{basis_tag}]",
     "━━━━━━━━━━━━━━━━━━",
-    "🛡️ <b>INSTITUTIONAL GATE MATRIX:</b>",
-    f"• <b>Intermarket (ES=F):</b> {es_pct:+.2f}%",
-    f"• <b>FX Slope (USD/THB):</b> {thb_chg:+.2f}%",
-    f"• <b>Mega-Cap Breadth:</b> {advancing} Adv / {declining} Dec",
-    f"• <b>DELTA Movement:</b> {delta_chg:+.2f}%",
-    "  " + " | ".join(breadth_details),
+    "🛡️ <b>INSTITUTIONAL GATE CHECK:</b>",
+    f"• Asian Delta (ES=F): <b>{es_pct:+.2f}%</b> [{es_tag}]",
+    f"• FX Trend (USD/THB): <b>{thb_chg:+.2f}%</b> [{thb_tag}]",
+    f"• Mega-Cap Breadth: <b>{advancing} Adv / {declining} Dec</b> [{breadth_tag}]",
+    f"• DELTA Decoupler: <b>{delta_chg:+.2f}%</b> [{delta_tag}]",
+    b_row1,
+    b_row2,
+    b_row3,
     "━━━━━━━━━━━━━━━━━━"
 ])
 
-# Master Plan Asymmetric Targets & Dynamic Chandelier ATR
 long_t1 = round(s50_price + max(5.5, s50_atr * 1.25), 1)
 short_t1 = round(s50_price - 4.5, 1)
 long_t2a = round(s50_price + 12.0, 1)
@@ -291,60 +295,4 @@ elif is_short_authorized:
     lines.extend([
         "🎯 <b>REGIME STATUS: RED (SHORT AUTHORIZED)</b>",
         "📋 <b>INSTITUTIONAL MASTER TICKET (10 Contracts):</b>",
-        f"• Order: <b>SELL OPEN (SHORT) 10 Contracts</b> (฿1.0M Baseline)",
-        f"• Limit Entry: <b>{s50_price:.1f}</b> (In ZOI)",
-        f"• Hard Stop: <b>{s50_price + stop_distance:.1f}</b> (+{stop_distance} pts structural cap)",
-        f"• <b>Tranche 1 (Bank 4 cts):</b> Limit <b>{short_t1:.1f}</b> (-4.5 pts &gt;&gt; Move stop to BE)",
-        f"• <b>Tranche 2A (Fixed 3 cts):</b> Limit <b>{short_t2a:.1f}</b> (-14.0 pts extended impulse)",
-        f"• <b>Tranche 2B (Runner 3 cts):</b> Chandelier Trail &gt;&gt; Low + {1.5*s50_atr:.1f} pts (Initial: <b>{chandelier_short:.1f}</b>)",
-        "━━━━━━━━━━━━━━━━━━",
-        "🔥 <b>HOUSE MONEY PYRAMID TICKET (+2 Contracts):</b>",
-        f"• Trigger: After T1 banks (-4.5 pts), place <b>SELL OPEN +2 cts</b> on next 15M breakdown.",
-        f"• Anchor Stop: <b>{s50_price:.1f}</b> (Breakeven). 100% financed by T1 banked profit.",
-        "━━━━━━━━━━━━━━━━━━",
-        "📲 <b>QUICK ORDER:</b>",
-        f"<code>SELL OPEN S50 10 cts @ {s50_price:.1f} | Stop: {s50_price + stop_distance:.1f}</code>"
-    ])
-else:
-    reasons = []
-    if not adx_pass: reasons.append(f"ADX < 20 ({daily_adx:.1f} Low Momentum)")
-    if not (va_pass_long or va_pass_short): reasons.append("Inside Prior Value Area (Chop)")
-    if not zoi_pass: reasons.append("Extended Beyond ZOI (No Chasing)")
-    if not basis_pass_long and not basis_pass_short: reasons.append("Futures Basis Clamped")
-    if not (long_breadth_pass or short_breadth_pass): reasons.append("Mega-Cap Breadth Split")
-    if not (long_delta_pass and short_delta_pass): reasons.append("DELTA Decoupler Bias")
-    if not (mss_15m_long or mss_15m_short): reasons.append("15M MSS Neutral")
-    if not reasons: reasons.append("Regime Filter Neutral")
-    lines.extend([
-        "⚠️ <b>REGIME STATUS: FILTER VETO ACTIVE</b>",
-        f"• <b>Reason:</b> {', '.join(reasons)}",
-        "• <b>Action:</b> Stand down. Zero edge. <i>(Silent notification)</i>"
-    ])
-
-lines.append("━━━━━━━━━━━━━━━━━━\n<i>Automated pipeline running via GitHub Cloud.</i>")
-full_msg = "\n".join(lines)
-
-keyboard = {
-    "inline_keyboard": [
-        [
-            {"text": "📈 S50 Futures Chart", "url": "https://www.tradingview.com/chart/?symbol=TFEX%3AS501!"},
-            {"text": "📲 Open InnovestX", "url": "https://play.google.com/store/apps/details?id=com.scbs.easyinvest"}
-        ]
-    ]
-}
-
-if token and chat_id:
-    res = requests.post(
-        f"https://api.telegram.org/bot{token}/sendMessage",
-        json={
-            "chat_id": chat_id,
-            "text": full_msg,
-            "parse_mode": "HTML",
-            "disable_notification": is_silent,
-            "reply_markup": keyboard
-        },
-        timeout=15
-    )
-    print(f"Telegram status: {res.status_code}")
-else:
-    print("Missing Telegram credentials.")
+        f"• Order: <b>SELL OPEN (SHORT) 10 Contracts</b>
