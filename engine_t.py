@@ -39,11 +39,11 @@ if not is_market_open_today and event_name == "schedule":
 
 notice_header = ""
 if not is_market_open_today:
-    notice_header = "⚠️ <b>[TEST MODE: SET Closed Today - Using Prior Close]</b>\n"
+    notice_header = "⚠️ <b>[TEST MODE: SET Closed Today - Using Prior Session Data]</b>\n"
 
-def safe_get_series(ticker, period="5d"):
+def safe_get_series(ticker, period="5d", interval="1d"):
     try:
-        df = yf.download(ticker, period=period, interval="1d", progress=False)
+        df = yf.download(ticker, period=period, interval=interval, progress=False)
         if df is not None and not df.empty:
             if isinstance(df.columns, pd.MultiIndex):
                 return df["Close"].iloc[:, 0].dropna().values
@@ -55,16 +55,16 @@ def safe_get_series(ticker, period="5d"):
 # 1. Asian E-mini S&P (ES=F)
 es_veto = False
 es_pct = 0.0
-c_es = safe_get_series("ES=F", "5d")
+c_es = safe_get_series("ES=F", "5d", "1d")
 if len(c_es) >= 2:
     es_pct = float(((c_es[-1] - c_es[-2]) / c_es[-2]) * 100.0)
     if es_pct <= -0.60:
         es_veto = True
 
-# 2. USD/THB FX Gate
+# 2. USD/THB FX Gate (5-Day Trend Slope)
 thb_veto = False
 thb_chg = 0.0
-c_thb = safe_get_series("THB=X", "10d")
+c_thb = safe_get_series("THB=X", "10d", "1d")
 if len(c_thb) >= 5:
     thb_chg = float(((c_thb[-1] - c_thb[-5]) / c_thb[-5]) * 100.0)
     if thb_chg > 0.30:
@@ -78,7 +78,7 @@ delta_chg = 0.0
 
 for t in tickers:
     clean = t.replace(".BK", "")
-    c_t = safe_get_series(t, "5d")
+    c_t = safe_get_series(t, "5d", "1d")
     if len(c_t) >= 2:
         chg = float(((c_t[-1] - c_t[-2]) / c_t[-2]) * 100.0)
         if clean == "DELTA":
@@ -96,20 +96,45 @@ for t in tickers:
 breadth_pass = (advancing >= 3)
 delta_veto = (delta_chg < -1.50)
 
-# 4. S50 Cash Index Trend & ATR
+# 4. Multi-Timeframe Structure (Daily Trend + 15M MSS Trigger)
 s50_price = 930.0
-s50_ema20 = 925.0
-s50_atr = 4.5
+s50_daily_ema20 = 925.0
+s50_15m_ema20 = 928.0
+s50_rsi15m = 50.0
 daily_bullish = True
+mss_15m_pass = True
 
-c_s50 = safe_get_series("^SET50", "3mo")
-if len(c_s50) >= 20:
-    s50_price = float(c_s50[-1])
-    s_ema = pd.Series(c_s50).ewm(span=20, adjust=False).mean()
-    s50_ema20 = float(s_ema.iloc[-1])
-    daily_bullish = s50_price >= s50_ema20
+# Daily Trend
+c_s50_d = safe_get_series("^SET50", "3mo", "1d")
+if len(c_s50_d) >= 20:
+    s50_price = float(c_s50_d[-1])
+    s_ema_d = pd.Series(c_s50_d).ewm(span=20, adjust=False).mean()
+    s50_daily_ema20 = float(s_ema_d.iloc[-1])
+    daily_bullish = s50_price >= s50_daily_ema20
 
-all_pass = (not es_veto) and (not thb_veto) and breadth_pass and (not delta_veto) and daily_bullish
+# 15M Market Structure Shift Check
+try:
+    df_15m = yf.download("^SET50", period="5d", interval="15m", progress=False)
+    if df_15m is not None and not df_15m.empty:
+        c_15m = df_15m["Close"].iloc[:, 0].dropna() if isinstance(df_15m.columns, pd.MultiIndex) else df_15m["Close"].dropna()
+        if len(c_15m) >= 25:
+            s50_price = float(c_15m.iloc[-1])
+            ema20_15m_series = c_15m.ewm(span=20, adjust=False).mean()
+            s50_15m_ema20 = float(ema20_15m_series.iloc[-1])
+
+            # 14-period RSI
+            delta_p = c_15m.diff()
+            gain = (delta_p.where(delta_p > 0, 0)).rolling(14).mean()
+            loss = (-delta_p.where(delta_p < 0, 0)).rolling(14).mean()
+            rs = gain / (loss + 1e-9)
+            s50_rsi15m = float((100 - (100 / (1 + rs))).iloc[-1])
+
+            # 15M MSS Trigger Rule: Price > 15M EMA20 and RSI > 50
+            mss_15m_pass = (s50_price >= s50_15m_ema20) and (s50_rsi15m >= 50.0)
+except Exception as e:
+    print(f"15M Data Error: {e}")
+
+all_pass = (not es_veto) and (not thb_veto) and breadth_pass and (not delta_veto) and daily_bullish and mss_15m_pass
 is_silent = not all_pass
 
 es_icon = "🔴 VETO" if es_veto else "🟢 PASS"
@@ -117,6 +142,7 @@ thb_icon = "🔴 VETO" if thb_veto else "🟢 PASS"
 breadth_icon = "🟢 PASS" if breadth_pass else "🔴 VETO"
 delta_icon = "🔴 VETO" if delta_veto else "🟢 PASS"
 trend_icon = "🟢 BULL" if daily_bullish else "🔴 BEAR"
+mss_icon = "🟢 TRIGGERED" if mss_15m_pass else "⚪ AWAITING"
 
 lines = []
 if notice_header:
@@ -128,7 +154,8 @@ lines.extend([
     f"📅 <b>Time:</b> {bkk_time_str} BKK",
     "━━━━━━━━━━━━━━━━━━",
     f"📈 <b>SET50 Index:</b> {s50_price:.2f} pts [{trend_icon}]",
-    f"• 20-day EMA: {s50_ema20:.2f} | 14-ATR: {s50_atr:.1f} pts",
+    f"• Daily EMA(20): {s50_daily_ema20:.2f} | 15M EMA(20): {s50_15m_ema20:.2f}",
+    f"• 15M MSS Momentum: RSI(14) = {s50_rsi15m:.1f} [{mss_icon}]",
     "━━━━━━━━━━━━━━━━━━",
     "🛡️ <b>INSTITUTIONAL GATE MATRIX:</b>",
     f"• <b>Intermarket (ES=F):</b> {es_pct:+.2f}% [{es_icon}]",
@@ -142,7 +169,7 @@ lines.extend([
 if all_pass:
     lines.extend([
         "🎯 <b>REGIME STATUS: GREEN (AUTHORIZED)</b>",
-        "📋 <b>SETTRADE BRACKET TICKET:</b>",
+        "📋 <b>INSTITUTIONAL BRACKET TICKET:</b>",
         f"• Size: <b>10 Contracts</b> (฿1.0M Baseline)",
         f"• Long Limit: <b>{s50_price:.1f}</b>",
         f"• Hard Stop: <b>{s50_price - 4.5:.1f}</b> (-4.5 pts cap)",
@@ -156,7 +183,8 @@ else:
     if thb_veto: vetos.append("THB Depreciation &gt; +0.30%")
     if not breadth_pass: vetos.append("Breadth &lt; 3/5")
     if delta_veto: vetos.append("DELTA Drag &lt; -1.50%")
-    if not daily_bullish: vetos.append("SET50 &lt; EMA(20)")
+    if not daily_bullish: vetos.append("SET50 &lt; Daily EMA(20)")
+    if not mss_15m_pass: vetos.append("15M MSS Structure Not Aligned")
     lines.extend([
         "⚠️ <b>REGIME STATUS: FILTER VETO ACTIVE</b>",
         f"• <b>Suppressed by:</b> {', '.join(vetos)}",
@@ -171,7 +199,7 @@ keyboard = {
     "inline_keyboard": [
         [
             {"text": "📈 S50 Futures Chart", "url": "https://www.tradingview.com/chart/?symbol=TFEX%3AS501!"},
-            {"text": "📲 Open InnovestX", "url": "https://market.android.com/details?id=com.scb.easyinvest"}
+            {"text": "📲 Open InnovestX", "url": "https://play.google.com/store/apps/details?id=com.scbs.easyinvest"}
         ]
     ]
 }
@@ -191,4 +219,3 @@ if token and chat_id:
     print(f"Telegram status: {res.status_code}")
 else:
     print("Missing Telegram credentials.")
-  
