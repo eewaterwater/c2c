@@ -111,33 +111,36 @@ daily_bearish = False
 mss_15m_long = False
 mss_15m_short = False
 
-# Daily Trend & 14-day ATR estimation
+# Robust Daily Trend & ATR
 try:
-    df_daily = yf.download("^SET50", period="3mo", interval="1d", progress=False)
-    if df_daily is not None and not df_daily.empty:
-        c_s50_d = df_daily["Close"].iloc[:, 0].dropna() if isinstance(df_daily.columns, pd.MultiIndex) else df_daily["Close"].dropna()
-        h_s50_d = df_daily["High"].iloc[:, 0].dropna() if isinstance(df_daily.columns, pd.MultiIndex) else df_daily["High"].dropna()
-        l_s50_d = df_daily["Low"].iloc[:, 0].dropna() if isinstance(df_daily.columns, pd.MultiIndex) else df_daily["Low"].dropna()
+    df_d = yf.download("^SET50", period="3mo", interval="1d", progress=False)
+    if df_d is not None and not df_d.empty:
+        c_series = df_d["Close"].iloc[:, 0] if isinstance(df_d.columns, pd.MultiIndex) else df_d["Close"]
+        h_series = df_d["High"].iloc[:, 0] if isinstance(df_d.columns, pd.MultiIndex) else df_d["High"]
+        l_series = df_d["Low"].iloc[:, 0] if isinstance(df_d.columns, pd.MultiIndex) else df_d["Low"]
         
-        if len(c_s50_d) >= 20:
-            s50_price = float(c_s50_d.iloc[-1])
-            s_ema_d = c_s50_d.ewm(span=20, adjust=False).mean()
-            s50_daily_ema20 = float(s_ema_d.iloc[-1])
+        c_vals = c_series.dropna().values
+        h_vals = h_series.dropna().values
+        l_vals = l_series.dropna().values
+
+        if len(c_vals) >= 20:
+            s50_price = float(c_vals[-1])
+            ema_series = pd.Series(c_vals).ewm(span=20, adjust=False).mean()
+            s50_daily_ema20 = float(ema_series.iloc[-1])
             daily_bullish = s50_price >= s50_daily_ema20
             daily_bearish = s50_price < s50_daily_ema20
-            
-            # ATR (14)
-            tr1 = h_s50_d - l_s50_d
-            tr2 = (h_s50_d - c_s50_d.shift(1)).abs()
-            tr3 = (l_s50_d - c_s50_d.shift(1)).abs()
-            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-            atr_series = tr.rolling(14).mean()
-            if not atr_series.dropna().empty:
-                s50_atr = max(float(atr_series.iloc[-1]), 3.5)
-except Exception as e:
-    print(f"Daily/ATR Data Error: {e}")
 
-# Intraday 15M MSS Trigger
+            # Safe numpy-based ATR calculation
+            tr_list = []
+            for k in range(1, len(c_vals)):
+                tr_val = max(h_vals[k] - l_vals[k], abs(h_vals[k] - c_vals[k-1]), abs(l_vals[k] - c_vals[k-1]))
+                tr_list.append(tr_val)
+            if len(tr_list) >= 14:
+                s50_atr = max(float(np.mean(tr_list[-14:])), 3.5)
+except Exception as e:
+    print(f"Daily/ATR calculation error: {e}")
+
+# 15M MSS Trigger Check
 try:
     df_15m = yf.download("^SET50", period="5d", interval="15m", progress=False)
     if df_15m is not None and not df_15m.empty:
@@ -156,14 +159,16 @@ try:
             mss_15m_long = (s50_price >= s50_15m_ema20) and (s50_rsi15m >= 50.0)
             mss_15m_short = (s50_price <= s50_15m_ema20) and (s50_rsi15m <= 48.0)
 except Exception as e:
-    print(f"15M Data Error: {e}")
+    print(f"15M calculation error: {e}")
 
 # Basis Clamping: Basis = Futures Price - Cash Index
 basis_delta = 0.5
 try:
-    c_fut_proxy = safe_get_series("0840.HK", "5d", "1d")
-    if len(c_fut_proxy) >= 2:
-        basis_delta = float(c_fut_proxy[-1] - s50_price) if abs(c_fut_proxy[-1] - s50_price) < 25.0 else 0.5
+    c_fut = safe_get_series("0840.HK", "5d", "1d")
+    if len(c_fut) >= 2:
+        diff = float(c_fut[-1] - s50_price)
+        if abs(diff) < 25.0:
+            basis_delta = diff
 except Exception:
     basis_delta = 0.5
 
@@ -210,6 +215,86 @@ lines.extend([
     "━━━━━━━━━━━━━━━━━━"
 ])
 
-# Master Playbook Fine-Tuned Targets & Dynamic Chandelier ATR
-long_t1 = round(s50_price + 5.5, 1)          # Longs bank at +5.5 to +6.0 pts
-short_t1 = round(s50_price - 4.5,
+long_t1 = round(s50_price + 5.5, 1)
+short_t1 = round(s50_price - 4.5, 1)
+long_t2a = round(s50_price + 12.0, 1)
+short_t2a = round(s50_price - 14.0, 1)
+chandelier_long = round(s50_price - (1.5 * s50_atr), 1)
+chandelier_short = round(s50_price + (1.5 * s50_atr), 1)
+
+if is_long_authorized:
+    lines.extend([
+        "🎯 <b>REGIME STATUS: GREEN (LONG AUTHORIZED)</b>",
+        "📋 <b>INSTITUTIONAL MASTER TICKET (10 Contracts):</b>",
+        f"• Order: <b>BUY OPEN 10 Contracts</b> (฿1.0M Baseline)",
+        f"• Limit Entry: <b>{s50_price:.1f}</b>",
+        f"• Hard Stop: <b>{s50_price - 4.5:.1f}</b> (-4.5 pts cap)",
+        f"• <b>Tranche 1 (Bank 4 cts):</b> Limit <b>{long_t1:.1f}</b> (+5.5 pts &gt;&gt; Move stop to BE)",
+        f"• <b>Tranche 2A (Fixed 3 cts):</b> Limit <b>{long_t2a:.1f}</b> (+12.0 pts)",
+        f"• <b>Tranche 2B (Runner 3 cts):</b> Chandelier Trail &gt;&gt; High - {1.5*s50_atr:.1f} pts (Initial: <b>{chandelier_long:.1f}</b>)",
+        "━━━━━━━━━━━━━━━━━━",
+        "🔥 <b>HOUSE MONEY PYRAMID TICKET (+2 Contracts):</b>",
+        f"• Trigger: After T1 banks (+5.5 pts), place <b>BUY OPEN +2 cts</b> on next 15M breakout.",
+        f"• Anchor Stop: <b>{s50_price:.1f}</b> (Breakeven). 100% financed by T1 banked profit.",
+        "━━━━━━━━━━━━━━━━━━",
+        "📲 <b>QUICK ORDER:</b>",
+        f"<code>BUY OPEN S50 10 cts @ {s50_price:.1f} | Stop: {s50_price - 4.5:.1f}</code>"
+    ])
+elif is_short_authorized:
+    lines.extend([
+        "🎯 <b>REGIME STATUS: RED (SHORT AUTHORIZED)</b>",
+        "📋 <b>INSTITUTIONAL MASTER TICKET (10 Contracts):</b>",
+        f"• Order: <b>SELL OPEN (SHORT) 10 Contracts</b> (฿1.0M Baseline)",
+        f"• Limit Entry: <b>{s50_price:.1f}</b>",
+        f"• Hard Stop: <b>{s50_price + 4.5:.1f}</b> (+4.5 pts cap)",
+        f"• <b>Tranche 1 (Bank 4 cts):</b> Limit <b>{short_t1:.1f}</b> (-4.5 pts &gt;&gt; Move stop to BE)",
+        f"• <b>Tranche 2A (Fixed 3 cts):</b> Limit <b>{short_t2a:.1f}</b> (-14.0 pts extended impulse)",
+        f"• <b>Tranche 2B (Runner 3 cts):</b> Chandelier Trail &gt;&gt; Low + {1.5*s50_atr:.1f} pts (Initial: <b>{chandelier_short:.1f}</b>)",
+        "━━━━━━━━━━━━━━━━━━",
+        "🔥 <b>HOUSE MONEY PYRAMID TICKET (+2 Contracts):</b>",
+        f"• Trigger: After T1 banks (-4.5 pts), place <b>SELL OPEN +2 cts</b> on next 15M breakdown.",
+        f"• Anchor Stop: <b>{s50_price:.1f}</b> (Breakeven). 100% financed by T1 banked profit.",
+        "━━━━━━━━━━━━━━━━━━",
+        "📲 <b>QUICK ORDER:</b>",
+        f"<code>SELL OPEN S50 10 cts @ {s50_price:.1f} | Stop: {s50_price + 4.5:.1f}</code>"
+    ])
+else:
+    reasons = []
+    if not basis_pass_long and not basis_pass_short: reasons.append("Basis Clamped")
+    if not (long_breadth_pass or short_breadth_pass): reasons.append("Breadth Split")
+    if not (long_delta_pass and short_delta_pass): reasons.append("DELTA Bias Conflict")
+    if not (mss_15m_long or mss_15m_short): reasons.append("15M MSS Neutral")
+    if not reasons: reasons.append("Market in Neutral Band")
+    lines.extend([
+        "⚠️ <b>REGIME STATUS: FILTER VETO ACTIVE</b>",
+        f"• <b>Reason:</b> {', '.join(reasons)}",
+        "• <b>Action:</b> Stand down. Zero directional edge. <i>(Silent notification)</i>"
+    ])
+
+lines.append("━━━━━━━━━━━━━━━━━━\n<i>Automated pipeline running via GitHub Cloud.</i>")
+full_msg = "\n".join(lines)
+
+keyboard = {
+    "inline_keyboard": [
+        [
+            {"text": "📈 S50 Futures Chart", "url": "https://www.tradingview.com/chart/?symbol=TFEX%3AS501!"},
+            {"text": "📲 Open InnovestX", "url": "https://play.google.com/store/apps/details?id=com.scbs.easyinvest"}
+        ]
+    ]
+}
+
+if token and chat_id:
+    res = requests.post(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        json={
+            "chat_id": chat_id,
+            "text": full_msg,
+            "parse_mode": "HTML",
+            "disable_notification": is_silent,
+            "reply_markup": keyboard
+        },
+        timeout=15
+    )
+    print(f"Telegram status: {res.status_code}")
+else:
+    print("Missing Telegram credentials.")
