@@ -25,6 +25,9 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -50,8 +53,6 @@ jobs:
           import requests
           from datetime import datetime
           import pytz
-          import exchange_calendars as xcals
-          import yfinance as yf
           import pandas as pd
           import numpy as np
 
@@ -66,7 +67,7 @@ jobs:
           bkk_time_str = bkk_now.strftime("%Y-%m-%d %H:%M:%S")
 
           # -------------------------------------------------------------
-          # 1. State Maintenance
+          # 1. State Maintenance (Safe JSON handling)
           # -------------------------------------------------------------
           state_path = "state.json"
           state = {
@@ -118,10 +119,17 @@ jobs:
           streak_boost = win_streak >= 3
 
           # -------------------------------------------------------------
-          # 2. US Market Calendar Gate (XNYS)
+          # 2. Market Calendar Check (Safe Exception Wrapped)
           # -------------------------------------------------------------
-          xnys = xcals.get_calendar("XNYS")
-          is_us_open_today = xnys.is_session(ny_date_str)
+          is_us_open_today = True
+          try:
+              import exchange_calendars as xcals
+              xnys = xcals.get_calendar("XNYS")
+              is_us_open_today = bool(xnys.is_session(pd.Timestamp(ny_date_str)))
+          except Exception as e:
+              print(f"Calendar check fallback: {e}")
+              # Basic weekend fallback
+              is_us_open_today = ny_now.weekday() < 5
 
           if not is_us_open_today and event_name == "schedule":
               msg = (
@@ -145,16 +153,21 @@ jobs:
           if not is_us_open_today:
               notice_header = "⚠️ <b>[TEST MODE: US Market Closed Today - Using Prior Close]</b>\n"
 
+          # -------------------------------------------------------------
+          # 3. Safe yfinance Data Helpers
+          # -------------------------------------------------------------
+          import yfinance as yf
+
           def safe_series(df):
               if df is None or df.empty:
                   return np.array([])
-              if isinstance(df.columns, pd.MultiIndex):
-                  return df["Close"].iloc[:, 0].dropna().values
-              return df["Close"].dropna().values
+              try:
+                  if isinstance(df.columns, pd.MultiIndex):
+                      return df["Close"].iloc[:, 0].dropna().values
+                  return df["Close"].dropna().values
+              except Exception:
+                  return np.array([])
 
-          # -------------------------------------------------------------
-          # 3. USD/THB Ingestion
-          # -------------------------------------------------------------
           usd_thb = 35.0
           try:
               thb_df = yf.download("THB=X", period="5d", interval="1d", progress=False)
@@ -165,7 +178,7 @@ jobs:
               print(f"FX Error: {e}")
 
           # -------------------------------------------------------------
-          # 4. Macro Regime Classifier & Dynamic Sizing
+          # 4. Macro Regime Classifier
           # -------------------------------------------------------------
           regime_name = "Regime 3: Rangebound Chop"
           regime_icon = "🟡"
@@ -246,10 +259,10 @@ jobs:
               try:
                   t_obj = yf.Ticker(sym)
                   hist = t_obj.history(period="3mo", interval="1d")
-                  if len(hist) < 30:
+                  c = safe_series(hist)
+                  if len(c) < 25:
                       continue
 
-                  c = hist["Close"].dropna().values
                   curr_p = float(c[-1])
                   ema21 = float(pd.Series(c).ewm(span=21, adjust=False).mean().iloc[-1])
 
@@ -331,4 +344,103 @@ jobs:
                       units = raw_units
                       capped_tag = ""
 
-                  target
+                  target1_thb = entry_thb + (1.5 * risk_per_unit)
+                  target2_thb = entry_thb + (3.0 * risk_per_unit)
+                  t1_units = int(units * 0.60)
+                  t2_units = units - t1_units
+
+                  ticket_blocks.extend([
+                      f"🎯 <b>{p['dr']} ({p['ticker']}) Setup:</b>",
+                      f"  • Entry: <b>฿{entry_thb:.2f}</b> (${entry_usd:.2f})",
+                      f"  • Hard Stop: <b>฿{stop_thb:.2f}</b> (-2.5%)",
+                      f"  • Sizing: <b>{units:,} units</b> (Outlay: ฿{units*entry_thb:,.0f} THB){capped_tag}",
+                      f"  • <b>T1 (Bank 60% / {t1_units:,} u):</b> Limit <b>฿{target1_thb:.2f}</b> (+1.5R &gt;&gt; Stop to BE)",
+                      f"  • <b>T2 (Runner 40% / {t2_units:,} u):</b> Limit <b>฿{target2_thb:.2f}</b> (+3.0R)",
+                      ""
+                  ])
+
+                  settrade_copy_blocks.append(
+                      f"<code>BUY {p['dr']} @ ฿{entry_thb:.2f} | Vol: {units:,} | Stop: ฿{stop_thb:.2f}</code>"
+                  )
+          elif circuit_breaker_active:
+              ticket_blocks.append(f"⛔ <b>CIRCUIT BREAKER TRIGGERED:</b>\n• {circuit_reason}\n• All new buy orders suppressed.")
+          else:
+              ticket_blocks.append("📋 <b>EXECUTION:</b> Zero breakout setups qualified. Retain cash in MMF. <i>(Silent notification)</i>")
+
+          is_silent = not has_executable_trade
+
+          lines = []
+          if notice_header:
+              lines.append(notice_header)
+
+          title_tag = "🚨 <b>[ACTION REQUIRED: US DRx ENTRY]</b>" if has_executable_trade else "🇺🇸 <b>[C2C Engine E - Dual-Vault Briefing]</b>"
+          lines.extend([
+              title_tag,
+              f"📅 <b>Time:</b> {bkk_time_str} BKK",
+              f"💵 <b>USD/THB:</b> ฿{usd_thb:.2f}",
+              "━━━━━━━━━━━━━━━━━━",
+              f"📊 <b>MACRO REGIME:</b> {regime_icon} <b>{regime_name}</b>",
+              f"• <b>Risk Budget:</b> <b>{r_label}</b>",
+              f"• <b>Vault A Target:</b> <code>{vault_a_alloc}</code>",
+              f"• <b>State:</b> Win Streak: <b>{win_streak}</b> | Daily Stops: <b>{state.get('daily_stopouts', 0)}/2</b>",
+              "━━━━━━━━━━━━━━━━━━",
+              "🔍 <b>WATCHPOOL METRICS:</b>",
+              "\n".join(summary_lines) if summary_lines else "• Data pending",
+              "━━━━━━━━━━━━━━━━━━"
+          ])
+          lines.extend(ticket_blocks)
+
+          if settrade_copy_blocks:
+              lines.append("━━━━━━━━━━━━━━━━━━\n📲 <b>SETTRADE QUICK-PASTE:</b>")
+              lines.extend(settrade_copy_blocks)
+
+          lines.append("━━━━━━━━━━━━━━━━━━\n<i>Automated pipeline running via GitHub Cloud.</i>")
+          full_msg = "\n".join(lines)
+
+          # -------------------------------------------------------------
+          # Telegram Deep-Link Keyboard
+          # -------------------------------------------------------------
+          keyboard_buttons = [
+              [
+                  {"text": "📲 Open Streaming", "url": "https://www.settrade.com"}
+              ]
+          ]
+
+          if top_picks:
+              for p in top_picks:
+                  sym = p["ticker"]
+                  exch = p.get("exchange", "NASDAQ")
+                  tv_url = f"https://www.tradingview.com/symbols/{exch}-{sym}/"
+                  keyboard_buttons.append([
+                      {"text": f"📈 {sym} Overview & Chart", "url": tv_url}
+                  ])
+          else:
+              keyboard_buttons.append([
+                  {"text": "📈 QQQ Overview & Chart", "url": "https://www.tradingview.com/symbols/NASDAQ-QQQ/"}
+              ])
+
+          keyboard = {"inline_keyboard": keyboard_buttons}
+
+          if token and chat_id:
+              res = requests.post(
+                  f"https://api.telegram.org/bot{token}/sendMessage",
+                  json={
+                      "chat_id": chat_id,
+                      "text": full_msg,
+                      "parse_mode": "HTML",
+                      "disable_notification": is_silent,
+                      "reply_markup": keyboard
+                  },
+                  timeout=15
+              )
+              print(f"Telegram status: {res.status_code}")
+          else:
+              print("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
+          EOF
+
+      - name: Commit Updated State
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          git diff --quiet && git diff --staged --quiet || (git commit -m "chore(state): update trade engine state [skip ci]" && git push origin HEAD:main) || true
