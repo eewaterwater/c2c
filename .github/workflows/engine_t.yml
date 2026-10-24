@@ -1,11 +1,17 @@
-name: C2C Engine T (TFEX Scheduled Scanner)
+name: C2C Engine T (TFEX Multi-Window Scanner)
 
 on:
   schedule:
-    # 04:45 UTC = 11:45 AM Bangkok (Morning 2H Close)
-    - cron: '45 4 * * 1-5'
-    # 07:15 UTC = 02:15 PM Bangkok (Afternoon 2H Close)
-    - cron: '15 7 * * 1-5'
+    # --- Morning Window (10:15 - 12:00 BKK) ---
+    - cron: '30 3 * * 1-5'    # 10:30 AM BKK (03:30 UTC)
+    - cron: '15 4 * * 1-5'    # 11:15 AM BKK (04:15 UTC)
+    - cron: '45 4 * * 1-5'    # 11:45 AM BKK (04:45 UTC)
+
+    # --- Afternoon Window (14:15 - 16:15 BKK) ---
+    - cron: '30 7 * * 1-5'    # 02:30 PM BKK (07:30 UTC)
+    - cron: '15 8 * * 1-5'    # 03:15 PM BKK (08:15 UTC)
+    - cron: '0 9 * * 1-5'     # 04:00 PM BKK (09:00 UTC)
+
   workflow_dispatch:
 
 jobs:
@@ -34,4 +40,3 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           EVENT_NAME: ${{ github.event_name }}
         run: python engine_t.py
-        
