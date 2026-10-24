@@ -6,7 +6,7 @@ on:
     - cron: '45 4 * * 1-5'
     # 07:15 UTC = 02:15 PM Bangkok (Afternoon 2H Session Close)
     - cron: '15 7 * * 1-5'
-  workflow_dispatch: # Allows manual trigger anytime from the Actions tab
+  workflow_dispatch: # Allows manual trigger anytime from GitHub Actions tab
 
 jobs:
   scan-and-alert:
@@ -19,9 +19,10 @@ jobs:
 
       - name: Install Dependencies
         run: |
+          pip install --upgrade pip
           pip install requests yfinance pandas pytz
 
-      - name: Execute Scan & Send Alert
+      - name: Execute Market Scan & Send Alert
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -31,30 +32,134 @@ jobs:
           import requests
           from datetime import datetime
           import pytz
+          import yfinance as yf
+          import pandas as pd
 
           token = os.environ.get("TELEGRAM_BOT_TOKEN")
           chat_id = os.environ.get("TELEGRAM_CHAT_ID")
           bkk_time = datetime.now(pytz.timezone("Asia/Bangkok")).strftime("%Y-%m-%d %H:%M:%S")
 
-          message = (
-              f"⚡ <b>[C2C Engine T - Phase 1 Active]</b>\n"
-              f"📅 <b>Time:</b> {bkk_time} (BKK)\n"
-              f"━━━━━━━━━━━━━━━━━━\n"
-              f"• <b>Status:</b> Scheduled runner operational\n"
-              f"• <b>Macro Calendar:</b> CLEAR (No BOT/CPI veto)\n"
-              f"• <b>Engine State:</b> Monitoring 2H trigger windows\n"
-              f"━━━━━━━━━━━━━━━━━━\n"
-              f"<i>Automated pipeline running via GitHub Cloud.</i>"
-          )
+          # -------------------------------------------------------------
+          # 1. Intermarket Gate: E-mini S&P (ES=F)
+          # Veto if intraday drop <= -0.60%
+          # -------------------------------------------------------------
+          es_veto = False
+          es_pct = 0.0
+          try:
+              es_data = yf.download("ES=F", period="2d", interval="1d", progress=False)
+              if len(es_data) >= 2:
+                  prev_close = float(es_data["Close"].iloc[-2].squeeze())
+                  curr_close = float(es_data["Close"].iloc[-1].squeeze())
+                  es_pct = ((curr_close - prev_close) / prev_close) * 100.0
+                  if es_pct <= -0.60:
+                      es_veto = True
+          except Exception as e:
+              print(f"Error fetching ES=F: {e}")
+
+          # -------------------------------------------------------------
+          # 2. FX Gate: USD/THB (THB=X)
+          # Veto if 5-day depreciation slope > +0.30%
+          # -------------------------------------------------------------
+          thb_veto = False
+          thb_change_pct = 0.0
+          try:
+              thb_data = yf.download("THB=X", period="7d", interval="1d", progress=False)
+              if len(thb_data) >= 5:
+                  start_thb = float(thb_data["Close"].iloc[-5].squeeze())
+                  latest_thb = float(thb_data["Close"].iloc[-1].squeeze())
+                  thb_change_pct = ((latest_thb - start_thb) / start_thb) * 100.0
+                  if thb_change_pct > 0.30:
+                      thb_veto = True
+          except Exception as e:
+              print(f"Error fetching THB=X: {e}")
+
+          # -------------------------------------------------------------
+          # 3. Mega-Cap Breadth Gate: DELTA, PTT, PTTEP, BDMS, CPALL
+          # Pass if at least >= 3/5 advancing
+          # -------------------------------------------------------------
+          tickers = ["DELTA.BK", "PTT.BK", "PTTEP.BK", "BDMS.BK", "CPALL.BK"]
+          advancing = 0
+          breadth_details = []
+          try:
+              breadth_df = yf.download(tickers, period="2d", interval="1d", progress=False)
+              for t in tickers:
+                  clean_name = t.replace(".BK", "")
+                  try:
+                      p_close = float(breadth_df["Close"][t].iloc[-2].squeeze())
+                      c_close = float(breadth_df["Close"][t].iloc[-1].squeeze())
+                      chg = ((c_close - p_close) / p_close) * 100.0
+                      if chg > 0:
+                          advancing += 1
+                          breadth_details.append(f"🟢 {clean_name}: +{chg:.2f}%")
+                      elif chg < 0:
+                          breadth_details.append(f"🔴 {clean_name}: {chg:.2f}%")
+                      else:
+                          breadth_details.append(f"⚪ {clean_name}: 0.00%")
+                  except Exception:
+                      breadth_details.append(f"⚪ {clean_name}: N/A")
+          except Exception as e:
+              print(f"Error fetching breadth: {e}")
+
+          breadth_pass = (advancing >= 3)
+
+          # -------------------------------------------------------------
+          # Evaluate Composite Gate Status
+          # -------------------------------------------------------------
+          all_gates_pass = (not es_veto) and (not thb_veto) and breadth_pass
+
+          es_icon = "🔴 VETO" if es_veto else "🟢 PASS"
+          thb_icon = "🔴 VETO" if thb_veto else "🟢 PASS"
+          breadth_icon = "🟢 PASS" if breadth_pass else "🔴 VETO"
+
+          # -------------------------------------------------------------
+          # Build Telegram Notification
+          # -------------------------------------------------------------
+          lines = [
+              "⚡ <b>[C2C Engine T - Market Scan]</b>",
+              f"📅 <b>Time:</b> {bkk_time} BKK",
+              "━━━━━━━━━━━━━━━━━━",
+              f"• <b>Intermarket (ES=F):</b> {es_pct:+.2f}% [{es_icon}]",
+              f"• <b>FX Slope (USD/THB 5D):</b> {thb_change_pct:+.2f}% [{thb_icon}]",
+              f"• <b>Mega-Cap Breadth:</b> {advancing}/5 Advancing [{breadth_icon}]",
+              "  " + " | ".join(breadth_details),
+              "━━━━━━━━━━━━━━━━━━"
+          ]
+
+          if all_gates_pass:
+              lines.extend([
+                  "🎯 <b>REGIME STATUS: GREEN (ALL GATES PASS)</b>",
+                  "• <b>Action:</b> Valid 2H Swing Long setups permitted",
+                  "• <b>Bracket Rules:</b>",
+                  "  - Max Hard Stop: <b>-4.5 pts</b> (Risk cap < 1.0%)",
+                  "  - Tranche 1 (Bank 4 cts): <b>+4.0 pts</b> (ratchet stop to BE)",
+                  "  - Tranche 2A (Runner 3 cts): Limit <b>+12.0 pts</b>",
+                  "  - Tranche 2B (Runner 3 cts): Trail HH - 1.5 ATR"
+              ])
+          else:
+              veto_reasons = []
+              if es_veto:
+                  veto_reasons.append("ES Drop ≤ -0.60%")
+              if thb_veto:
+                  veto_reasons.append("THB Depreciation > +0.30%")
+              if not breadth_pass:
+                  veto_reasons.append("Mega-Cap Breadth < 3/5 advancing")
+              lines.extend([
+                  "⚠️ <b>REGIME STATUS: FILTER VETO ACTIVE</b>",
+                  f"• <b>Vetoed by:</b> {', '.join(veto_reasons)}",
+                  "• <b>Action:</b> Stand down. Long execution suppressed."
+              ])
+
+          lines.append("<i>Automated pipeline running via GitHub Cloud.</i>")
+          message = "\n".join(lines)
 
           if token and chat_id:
               url = f"https://api.telegram.org/bot{token}/sendMessage"
               res = requests.post(
                   url,
                   json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"},
-                  timeout=10
+                  timeout=15
               )
-              print(f"Telegram status: {res.status_code}")
+              print(f"Telegram response: {res.status_code}")
           else:
-              print("Missing Telegram secrets: Check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in repo settings.")
+              print("Missing Telegram secrets.")
           EOF
