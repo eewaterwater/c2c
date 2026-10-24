@@ -4,7 +4,7 @@ on:
   schedule:
     # 13:00 UTC = 20:00 Bangkok Time (Mon-Fri pre-US cash open)
     - cron: '0 13 * * 1-5'
-  workflow_dispatch: # Allows manual trigger anytime from Actions tab
+  workflow_dispatch:
 
 jobs:
   scan-equities:
@@ -28,7 +28,7 @@ jobs:
           python - << 'EOF'
           import os
           import requests
-          from datetime import datetime, timedelta
+          from datetime import datetime
           import pytz
           import yfinance as yf
           import pandas as pd
@@ -38,31 +38,47 @@ jobs:
           chat_id = os.environ.get("TELEGRAM_CHAT_ID")
           bkk_time = datetime.now(pytz.timezone("Asia/Bangkok")).strftime("%Y-%m-%d %H:%M:%S")
 
+          def safe_series(df):
+              if df is None or df.empty:
+                  return np.array([])
+              if isinstance(df.columns, pd.MultiIndex):
+                  return df["Close"].iloc[:, 0].dropna().values
+              return df["Close"].dropna().values
+
           # ------------------------------------------------------------------
-          # 1. Macro Regime Classifier (Daily QQQ)
+          # 1. Fetch USD/THB Exchange Rate
+          # ------------------------------------------------------------------
+          usd_thb = 35.0
+          try:
+              thb_df = yf.download("THB=X", period="5d", interval="1d", progress=False)
+              c_thb = safe_series(thb_df)
+              if len(c_thb) > 0:
+                  usd_thb = float(c_thb[-1])
+          except Exception as e:
+              print(f"FX Error: {e}")
+
+          # ------------------------------------------------------------------
+          # 2. Macro Regime Classifier (Daily QQQ)
           # ------------------------------------------------------------------
           regime_name = "Regime 3: Rangebound Chop"
           regime_icon = "🟡"
-          r_thb = 15000.0  # Default 0.5R
+          r_thb = 15000.0
           r_label = "0.50R (฿15,000 THB)"
           vault_a_alloc = "35% QQQ / 25% SMH / 40% SGOV"
           risk_authorized = True
+          qqq_3d_ret = 0.0
 
           try:
               qqq_df = yf.download("QQQ", period="1y", interval="1d", progress=False)
-              if len(qqq_df) >= 200:
-                  close = qqq_df["Close"].squeeze()
-                  ema20 = close.ewm(span=20, adjust=False).mean()
-                  ema50 = close.ewm(span=50, adjust=False).mean()
-                  sma200 = close.rolling(window=200).mean()
+              c_qqq = safe_series(qqq_df)
+              if len(c_qqq) >= 200:
+                  p_now = float(c_qqq[-1])
+                  p_ema20 = float(pd.Series(c_qqq).ewm(span=20, adjust=False).mean().iloc[-1])
+                  p_ema50 = float(pd.Series(c_qqq).ewm(span=50, adjust=False).mean().iloc[-1])
+                  p_sma200 = float(pd.Series(c_qqq).rolling(200).mean().iloc[-1])
 
-                  p_now = float(close.iloc[-1])
-                  p_ema20 = float(ema20.iloc[-1])
-                  p_ema50 = float(ema50.iloc[-1])
-                  p_sma200 = float(sma200.iloc[-1])
-
-                  # QQQ 3-day return for Relative Strength benchmark
-                  qqq_3d_ret = ((p_now - float(close.iloc[-4])) / float(close.iloc[-4])) * 100.0 if len(close) >= 4 else 0.0
+                  if len(c_qqq) >= 4:
+                      qqq_3d_ret = ((p_now - c_qqq[-4]) / c_qqq[-4]) * 100.0
 
                   if p_now < p_sma200 * 0.985:
                       regime_name = "Regime 4: Structural Bear"
@@ -90,18 +106,17 @@ jobs:
                       r_label = "0.50R (฿15,000 THB)"
                       vault_a_alloc = "35% QQQ / 25% SMH / 40% SGOV"
           except Exception as e:
-              print(f"Macro regime error: {e}")
-              qqq_3d_ret = 0.0
+              print(f"Macro error: {e}")
 
           # ------------------------------------------------------------------
-          # 2. Watchpool & High-Velocity Metrics
+          # 3. Watchpool DR Details & Conversion Ratios (SET Official)
           # ------------------------------------------------------------------
           watchpool = [
-              {"ticker": "NVDA", "dr": "NVDA80X"},
-              {"ticker": "PLTR", "dr": "PLTR01"},
-              {"ticker": "TSLA", "dr": "TSLA80X"},
-              {"ticker": "AMD",  "dr": "AMD80X"},
-              {"ticker": "SOXX", "dr": "SOXX23"}
+              {"ticker": "NVDA", "dr": "NVDA80X", "ratio": 200},
+              {"ticker": "PLTR", "dr": "PLTR01",  "ratio": 1100},
+              {"ticker": "TSLA", "dr": "TSLA80X", "ratio": 5000},
+              {"ticker": "AMD",  "dr": "AMD80X",  "ratio": 5000},
+              {"ticker": "SOXX", "dr": "SOXX23",  "ratio": 100}
           ]
 
           candidates = []
@@ -110,109 +125,135 @@ jobs:
           for item in watchpool:
               sym = item["ticker"]
               dr_sym = item["dr"]
+              ratio = item["ratio"]
               try:
                   t_obj = yf.Ticker(sym)
                   hist = t_obj.history(period="3mo", interval="1d")
                   if len(hist) < 30:
                       continue
 
-                  c = hist["Close"]
-                  curr_p = float(c.iloc[-1])
-                  ema21 = float(c.ewm(span=21, adjust=False).mean().iloc[-1])
+                  c = hist["Close"].dropna().values
+                  curr_p = float(c[-1])
+                  ema21 = float(pd.Series(c).ewm(span=21, adjust=False).mean().iloc[-1])
 
-                  # Relative Strength vs QQQ (3-Day Delta)
-                  p_3d_ago = float(c.iloc[-4]) if len(c) >= 4 else curr_p
-                  stock_3d_ret = ((curr_p - p_3d_ago) / p_3d_ago) * 100.0
-                  rs_delta = stock_3d_ret - qqq_3d_ret
+                  # 3-Day RS vs QQQ
+                  p_3d = float(c[-4]) if len(c) >= 4 else curr_p
+                  stock_ret = ((curr_p - p_3d) / p_3d) * 100.0
+                  rs_delta = stock_ret - qqq_3d_ret
 
-                  # Bollinger Band Width Compression (20-day, 2 std)
-                  sma20 = c.rolling(20).mean()
-                  std20 = c.rolling(20).std()
-                  bbw_series = ((sma20 + 2 * std20) - (sma20 - 2 * std20)) / sma20 * 100.0
-                  curr_bbw = float(bbw_series.iloc[-1])
-                  bbw_p25 = float(bbw_series.tail(60).quantile(0.25))
-                  is_compressed = curr_bbw <= bbw_p25
+                  # Bollinger Band Width Compression (20, 2)
+                  s_c = pd.Series(c)
+                  sma20 = s_c.rolling(20).mean()
+                  std20 = s_c.rolling(20).std()
+                  bbw = ((sma20 + 2*std20) - (sma20 - 2*std20)) / sma20 * 100.0
+                  is_compressed = bool(bbw.iloc[-1] <= bbw.tail(60).quantile(0.25))
 
                   # 72-Hour Earnings Blackout Gate
-                  has_imminent_earnings = False
+                  imminent_earn = False
                   try:
                       cal = t_obj.calendar
                       if cal is not None and not (isinstance(cal, pd.DataFrame) and cal.empty):
-                          earn_date = None
+                          dt = None
                           if isinstance(cal, pd.DataFrame) and "Earnings Date" in cal.index:
-                              earn_date = pd.to_datetime(cal.loc["Earnings Date"].iloc[0])
+                              dt = pd.to_datetime(cal.loc["Earnings Date"].iloc[0])
                           elif isinstance(cal, dict) and "Earnings Date" in cal:
-                              earn_date = pd.to_datetime(cal["Earnings Date"][0])
-                          
-                          if earn_date:
-                              earn_date_naive = earn_date.tz_localize(None) if earn_date.tzinfo else earn_date
-                              days_to_earn = (earn_date_naive - datetime.now()).days
-                              if 0 <= days_to_earn <= 3:
-                                  has_imminent_earnings = True
+                              dt = pd.to_datetime(cal["Earnings Date"][0])
+                          if dt:
+                              dt_naive = dt.tz_localize(None) if dt.tzinfo else dt
+                              if 0 <= (dt_naive - datetime.now()).days <= 3:
+                                  imminent_earn = True
                   except Exception:
                       pass
 
                   dist_21 = ((curr_p - ema21) / ema21) * 100.0
-
-                  # Status tags
                   comp_tag = "📦 Squeeze" if is_compressed else "Normal"
-                  earn_tag = "⚠️ EARNINGS <72H" if has_imminent_earnings else "Clear"
 
                   summary_lines.append(
-                      f"• <b>{dr_sym}</b> (${curr_p:.2f}): RS vs QQQ <b>{rs_delta:+.1f}%</b> | 21EMA {dist_21:+.1f}% | {comp_tag}"
+                      f"• <b>{dr_sym}</b> (${curr_p:.2f}): RS {rs_delta:+.1f}% | 21EMA {dist_21:+.1f}% | {comp_tag}"
                   )
 
-                  # Setup qualification: Above 21 EMA, no earnings, RS positive, compressed or near EMA
-                  if (curr_p >= ema21 * 0.99) and (not has_imminent_earnings) and (rs_delta > 0) and risk_authorized:
+                  if (curr_p >= ema21 * 0.99) and (not imminent_earn) and (rs_delta > 0) and risk_authorized:
                       candidates.append({
                           "dr": dr_sym,
                           "ticker": sym,
-                          "price": curr_p,
+                          "usd_price": curr_p,
+                          "ratio": ratio,
                           "rs": rs_delta,
-                          "stop": curr_p * 0.975,  # 2.5% structural pivot stop proxy
-                          "compressed": is_compressed
+                          "stop_usd": curr_p * 0.975
                       })
               except Exception as e:
-                  print(f"Error scanning {sym}: {e}")
+                  print(f"Error {sym}: {e}")
 
-          # Sort by Relative Strength
           candidates.sort(key=lambda x: x["rs"], reverse=True)
           top_picks = candidates[:2]
 
           # ------------------------------------------------------------------
-          # 3. Build Actionable Settrade Order Tickets
+          # 4. THB Conversion, Unit Calculation & Settrade Staging
           # ------------------------------------------------------------------
           ticket_blocks = []
+          settrade_copy_blocks = []
+
           if top_picks and risk_authorized and r_thb > 0:
-              ticket_blocks.append("📋 <b>STAGED HIGH-VELOCITY TICKETS (Vault B):</b>")
+              ticket_blocks.append("📋 <b>STAGED HIGH-VELOCITY TICKETS (THB Sized):</b>")
               for p in top_picks:
-                  entry_px = p["price"]
-                  stop_px = p["stop"]
-                  risk_per_share = entry_px - stop_px
-                  target_1 = entry_px + (1.5 * risk_per_share)
-                  target_2 = entry_px + (3.0 * risk_per_share)
+                  entry_usd = p["usd_price"]
+                  stop_usd = p["stop_usd"]
+                  ratio = p["ratio"]
+
+                  # Convert to THB per DR unit
+                  entry_thb = (entry_usd * usd_thb) / ratio
+                  stop_thb = (stop_usd * usd_thb) / ratio
+                  risk_per_unit = entry_thb - stop_thb
+
+                  if risk_per_unit <= 0.001:
+                      continue
+
+                  # Position Sizing
+                  raw_units = int(r_thb / risk_per_unit)
+                  raw_outlay = raw_units * entry_thb
+
+                  # 20% Vault B Cap (฿600,000 THB)
+                  max_cap = 600000.0
+                  if raw_outlay > max_cap:
+                      units = int(max_cap / entry_thb)
+                      capped_tag = " <i>(Capped at 20% Vault B)</i>"
+                  else:
+                      units = raw_units
+                      capped_tag = ""
+
+                  # Tranche Targets in THB
+                  target1_thb = entry_thb + (1.5 * risk_per_unit)
+                  target2_thb = entry_thb + (3.0 * risk_per_unit)
+                  t1_units = int(units * 0.60)
+                  t2_units = units - t1_units
 
                   ticket_blocks.extend([
                       f"🎯 <b>{p['dr']} ({p['ticker']}) Setup:</b>",
-                      f"  • Trigger Entry: <b>${entry_px:.2f}</b>",
-                      f"  • Hard Stop: <b>${stop_px:.2f}</b> (Risk: -2.5%)",
-                      f"  • <b>Tranche 1 (Bank 60%):</b> Limit <b>${target_1:.2f}</b> (+1.5R $\\rightarrow$ Move stop to BE)",
-                      f"  • <b>Tranche 2 (Runner 40%):</b> Limit <b>${target_2:.2f}</b> (+3.0R or trail 1H EMA9)",
-                      f"  • <b>Rules:</b> 72h max hold | Max position cap: ฿600k THB",
+                      f"  • Entry: <b>฿{entry_thb:.2f}</b> (${entry_usd:.2f})",
+                      f"  • Hard Stop: <b>฿{stop_thb:.2f}</b> (-2.5%)",
+                      f"  • Sizing: <b>{units:,} units</b> (Outlay: ฿{units*entry_thb:,.0f} THB){capped_tag}",
+                      f"  • <b>T1 (Bank 60% / {t1_units:,} u):</b> Limit <b>฿{target1_thb:.2f}</b> (+1.5R &gt;&gt; Stop to BE)",
+                      f"  • <b>T2 (Runner 40% / {t2_units:,} u):</b> Limit <b>฿{target2_thb:.2f}</b> (+3.0R)",
                       ""
                   ])
+
+                  # Formatted copy-paste block for Settrade Streaming
+                  settrade_copy_blocks.append(
+                      f"<code>BUY {p['dr']} @ ฿{entry_thb:.2f} | Vol: {units:,} | Stop: ฿{stop_thb:.2f}</code>"
+                  )
           else:
-              ticket_blocks.append("📋 <b>EXECUTION:</b> No active breakout triggers. Retain cash in MMF.")
+              ticket_blocks.append("📋 <b>EXECUTION:</b> Zero breakout setups qualified. Retain cash in MMF.")
 
           # ------------------------------------------------------------------
-          # 4. Dispatch Telegram Notification
+          # 5. Build and Send Telegram Message
           # ------------------------------------------------------------------
           lines = [
-              "🇺🇸 <b>[C2C Engine E - High-Velocity Scanner]</b>",
+              "🇺🇸 <b>[C2C Engine E - Dual-Vault Briefing]</b>",
               f"📅 <b>Time:</b> {bkk_time} BKK",
+              f"💵 <b>USD/THB:</b> ฿{usd_thb:.2f}",
               "━━━━━━━━━━━━━━━━━━",
               f"📊 <b>MACRO REGIME:</b> {regime_icon} <b>{regime_name}</b>",
-              f"• <b>Risk Unit Budget:</b> <b>{r_label}</b>",
+              f"• <b>Risk Budget:</b> <b>{r_label}</b>",
               f"• <b>Vault A Target:</b> <code>{vault_a_alloc}</code>",
               "━━━━━━━━━━━━━━━━━━",
               "🔍 <b>WATCHPOOL METRICS:</b>",
@@ -220,13 +261,17 @@ jobs:
               "━━━━━━━━━━━━━━━━━━"
           ]
           lines.extend(ticket_blocks)
-          lines.append("<i>Automated pipeline running via GitHub Cloud.</i>")
 
-          msg = "\n".join(lines)
+          if settrade_copy_blocks:
+              lines.append("━━━━━━━━━━━━━━━━━━\n📲 <b>SETTRADE QUICK-PASTE:</b>")
+              lines.extend(settrade_copy_blocks)
+
+          lines.append("━━━━━━━━━━━━━━━━━━\n<i>Automated pipeline running via GitHub Cloud.</i>")
+          full_msg = "\n".join(lines)
 
           if token and chat_id:
               url = f"https://api.telegram.org/bot{token}/sendMessage"
-              res = requests.post(url, json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}, timeout=15)
+              res = requests.post(url, json={"chat_id": chat_id, "text": full_msg, "parse_mode": "HTML"}, timeout=15)
               print(f"Telegram status: {res.status_code}")
           else:
               print("Missing Telegram credentials.")
