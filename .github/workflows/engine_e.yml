@@ -228,11 +228,11 @@ jobs:
           # 5. Watchpool DR Candidates & Compression Scan
           # -------------------------------------------------------------
           watchpool = [
-              {"ticker": "NVDA", "dr": "NVDA80X", "ratio": 200},
-              {"ticker": "PLTR", "dr": "PLTR01",  "ratio": 1100},
-              {"ticker": "TSLA", "dr": "TSLA80X", "ratio": 5000},
-              {"ticker": "AMD",  "dr": "AMD80X",  "ratio": 5000},
-              {"ticker": "SOXX", "dr": "SOXX23",  "ratio": 100}
+              {"ticker": "NVDA", "dr": "NVDA80X", "ratio": 200, "exchange": "NASDAQ"},
+              {"ticker": "PLTR", "dr": "PLTR01",  "ratio": 1100, "exchange": "NASDAQ"},
+              {"ticker": "TSLA", "dr": "TSLA80X", "ratio": 5000, "exchange": "NASDAQ"},
+              {"ticker": "AMD",  "dr": "AMD80X",  "ratio": 5000, "exchange": "NASDAQ"},
+              {"ticker": "SOXX", "dr": "SOXX23",  "ratio": 100, "exchange": "NASDAQ"}
           ]
 
           candidates = []
@@ -242,6 +242,7 @@ jobs:
               sym = item["ticker"]
               dr_sym = item["dr"]
               ratio = item["ratio"]
+              exchange = item["exchange"]
               try:
                   t_obj = yf.Ticker(sym)
                   hist = t_obj.history(period="3mo", interval="1d")
@@ -289,6 +290,7 @@ jobs:
                       candidates.append({
                           "dr": dr_sym,
                           "ticker": sym,
+                          "exchange": exchange,
                           "usd_price": curr_p,
                           "ratio": ratio,
                           "rs": rs_delta,
@@ -329,97 +331,4 @@ jobs:
                       units = raw_units
                       capped_tag = ""
 
-                  target1_thb = entry_thb + (1.5 * risk_per_unit)
-                  target2_thb = entry_thb + (3.0 * risk_per_unit)
-                  t1_units = int(units * 0.60)
-                  t2_units = units - t1_units
-
-                  ticket_blocks.extend([
-                      f"🎯 <b>{p['dr']} ({p['ticker']}) Setup:</b>",
-                      f"  • Entry: <b>฿{entry_thb:.2f}</b> (${entry_usd:.2f})",
-                      f"  • Hard Stop: <b>฿{stop_thb:.2f}</b> (-2.5%)",
-                      f"  • Sizing: <b>{units:,} units</b> (Outlay: ฿{units*entry_thb:,.0f} THB){capped_tag}",
-                      f"  • <b>T1 (Bank 60% / {t1_units:,} u):</b> Limit <b>฿{target1_thb:.2f}</b> (+1.5R &gt;&gt; Stop to BE)",
-                      f"  • <b>T2 (Runner 40% / {t2_units:,} u):</b> Limit <b>฿{target2_thb:.2f}</b> (+3.0R)",
-                      ""
-                  ])
-
-                  settrade_copy_blocks.append(
-                      f"<code>BUY {p['dr']} @ ฿{entry_thb:.2f} | Vol: {units:,} | Stop: ฿{stop_thb:.2f}</code>"
-                  )
-          elif circuit_breaker_active:
-              ticket_blocks.append(f"⛔ <b>CIRCUIT BREAKER TRIGGERED:</b>\n• {circuit_reason}\n• All new buy orders suppressed.")
-          else:
-              ticket_blocks.append("📋 <b>EXECUTION:</b> Zero breakout setups qualified. Retain cash in MMF. <i>(Silent notification)</i>")
-
-          is_silent = not has_executable_trade
-
-          lines = []
-          if notice_header:
-              lines.append(notice_header)
-
-          title_tag = "🚨 <b>[ACTION REQUIRED: US DRx ENTRY]</b>" if has_executable_trade else "🇺🇸 <b>[C2C Engine E - Dual-Vault Briefing]</b>"
-          lines.extend([
-              title_tag,
-              f"📅 <b>Time:</b> {bkk_time_str} BKK",
-              f"💵 <b>USD/THB:</b> ฿{usd_thb:.2f}",
-              "━━━━━━━━━━━━━━━━━━",
-              f"📊 <b>MACRO REGIME:</b> {regime_icon} <b>{regime_name}</b>",
-              f"• <b>Risk Budget:</b> <b>{r_label}</b>",
-              f"• <b>Vault A Target:</b> <code>{vault_a_alloc}</code>",
-              f"• <b>State:</b> Win Streak: <b>{win_streak}</b> | Daily Stops: <b>{state.get('daily_stopouts', 0)}/2</b>",
-              "━━━━━━━━━━━━━━━━━━",
-              "🔍 <b>WATCHPOOL METRICS:</b>",
-              "\n".join(summary_lines) if summary_lines else "• Data pending",
-              "━━━━━━━━━━━━━━━━━━"
-          ])
-          lines.extend(ticket_blocks)
-
-          if settrade_copy_blocks:
-              lines.append("━━━━━━━━━━━━━━━━━━\n📲 <b>SETTRADE QUICK-PASTE:</b>")
-              lines.extend(settrade_copy_blocks)
-
-          lines.append("━━━━━━━━━━━━━━━━━━\n<i>Automated pipeline running via GitHub Cloud.</i>")
-          full_msg = "\n".join(lines)
-
-          # -------------------------------------------------------------
-          # Telegram Inline Keyboard (Context-Aware Deep Links)
-          # -------------------------------------------------------------
-          top_chart_sym = top_picks[0]["ticker"] if top_picks else "QQQ"
-          keyboard_buttons = [
-              [
-                  {"text": "📲 Open Streaming", "url": "https://www.settrade.com"},
-                  {"text": f"📈 {top_chart_sym} Chart", "url": f"https://www.tradingview.com/chart/?symbol={top_chart_sym}"}
-              ]
-          ]
-
-          # If multiple picks, add a second row button for pick #2
-          if len(top_picks) > 1:
-              p2_sym = top_picks[1]["ticker"]
-              keyboard_buttons.append([
-                  {"text": f"📈 {p2_sym} Chart", "url": f"https://www.tradingview.com/chart/?symbol={p2_sym}"}
-              ])
-
-          keyboard = {"inline_keyboard": keyboard_buttons}
-
-          if token and chat_id:
-              res = requests.post(
-                  f"https://api.telegram.org/bot{token}/sendMessage",
-                  json={
-                      "chat_id": chat_id,
-                      "text": full_msg,
-                      "parse_mode": "HTML",
-                      "disable_notification": is_silent,
-                      "reply_markup": keyboard
-                  },
-                  timeout=15
-              )
-              print(f"Telegram status: {res.status_code}")
-          EOF
-
-      - name: Commit Updated State
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add state.json
-          git diff --quiet && git diff --staged --quiet || (git commit -m "chore(state): update trade engine state [skip ci]" && git push)
+                  target
