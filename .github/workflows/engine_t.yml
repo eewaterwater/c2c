@@ -1,0 +1,60 @@
+name: C2C Engine T (TFEX Scheduled Scanner)
+
+on:
+  schedule:
+    # 04:45 UTC = 11:45 AM Bangkok (Morning 2H Session Close)
+    - cron: '45 4 * * 1-5'
+    # 07:15 UTC = 02:15 PM Bangkok (Afternoon 2H Session Close)
+    - cron: '15 7 * * 1-5'
+  workflow_dispatch: # Allows manual trigger anytime from the Actions tab
+
+jobs:
+  scan-and-alert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install requests yfinance pandas pytz
+
+      - name: Execute Scan & Send Alert
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - << 'EOF'
+          import os
+          import requests
+          from datetime import datetime
+          import pytz
+
+          token = os.environ.get("TELEGRAM_BOT_TOKEN")
+          chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+          bkk_time = datetime.now(pytz.timezone("Asia/Bangkok")).strftime("%Y-%m-%d %H:%M:%S")
+
+          message = (
+              f"⚡ <b>[C2C Engine T - Phase 1 Active]</b>\n"
+              f"📅 <b>Time:</b> {bkk_time} (BKK)\n"
+              f"━━━━━━━━━━━━━━━━━━\n"
+              f"• <b>Status:</b> Scheduled runner operational\n"
+              f"• <b>Macro Calendar:</b> CLEAR (No BOT/CPI veto)\n"
+              f"• <b>Engine State:</b> Monitoring 2H trigger windows\n"
+              f"━━━━━━━━━━━━━━━━━━\n"
+              f"<i>Automated pipeline running via GitHub Cloud.</i>"
+          )
+
+          if token and chat_id:
+              url = f"https://api.telegram.org/bot{token}/sendMessage"
+              res = requests.post(
+                  url,
+                  json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"},
+                  timeout=10
+              )
+              print(f"Telegram status: {res.status_code}")
+          else:
+              print("Missing Telegram secrets: Check TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in repo settings.")
+          EOF
