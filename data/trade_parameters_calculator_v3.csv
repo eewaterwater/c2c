@@ -1,0 +1,10 @@
+item,value,note
+Equity (THB),1000000,
+Point value (THB/pt),200,S50 multiplier
+Contracts,10,capped so stop risk <= 1% of equity
+Initial stop (pts),4.5,all contracts
+Risk at stop (THB),9000,10 x 4.5 x 200 = 0.9% of equity
+T1,4 contracts,Entry + max(5.0 or 1.2 x 2H ATR); then runners to breakeven
+T2A,3 contracts,Entry + 12.0
+T2B,3 contracts,Chandelier HH - 1.5 x 2H ATR14
+Stagnation,6 bars,flat if T1 not filled

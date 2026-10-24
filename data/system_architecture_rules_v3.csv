@@ -1,0 +1,10 @@
+layer,rule,parameter
+Regime,Close above EMA20 and SMA200,daily
+Regime,EMA20 3-day slope,> +0.80 pts
+Regime,Extension ceiling,Close - EMA20 <= 2.5 x ATR14
+Breadth,Heavyweights net positive,>= 3 of DELTA PTT PTTEP BDMS CPALL
+Intermarket,E-mini return since 09:00 BKK,> -0.60%
+Intermarket,USD/THB 5-day slope,<= +0.30%
+Event,BOT MPC blackout,60 min before announcement
+Event,US CPI and FOMC days,no unbanked overnight holds
+Timing,Evaluation slots,11:45 and 14:15 BKK; no entries after 16:15
