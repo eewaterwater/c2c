@@ -20,9 +20,9 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install --upgrade pip
-          pip install requests yfinance pandas pytz
+          pip install requests yfinance pandas numpy pytz
 
-      - name: Execute Market Scan & Send Alert
+      - name: Execute TFEX S50 Scan & Generate Tickets
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -34,15 +34,16 @@ jobs:
           import pytz
           import yfinance as yf
           import pandas as pd
+          import numpy as np
 
           token = os.environ.get("TELEGRAM_BOT_TOKEN")
           chat_id = os.environ.get("TELEGRAM_CHAT_ID")
           bkk_time = datetime.now(pytz.timezone("Asia/Bangkok")).strftime("%Y-%m-%d %H:%M:%S")
 
           # -------------------------------------------------------------
-          # 1. Intermarket Gate: E-mini S&P (ES=F)
-          # Veto if intraday drop <= -0.60%
+          # 1. Macro & Intermarket Ingestion
           # -------------------------------------------------------------
+          # A. Asian E-mini S&P (ES=F)
           es_veto = False
           es_pct = 0.0
           try:
@@ -56,10 +57,7 @@ jobs:
           except Exception as e:
               print(f"Error fetching ES=F: {e}")
 
-          # -------------------------------------------------------------
-          # 2. FX Gate: USD/THB (THB=X)
-          # Veto if 5-day depreciation slope > +0.30%
-          # -------------------------------------------------------------
+          # B. FX Gate: USD/THB (THB=X)
           thb_veto = False
           thb_change_pct = 0.0
           try:
@@ -73,67 +71,128 @@ jobs:
           except Exception as e:
               print(f"Error fetching THB=X: {e}")
 
-          # -------------------------------------------------------------
-          # 3. Mega-Cap Breadth Gate: DELTA, PTT, PTTEP, BDMS, CPALL
-          # Pass if at least >= 3/5 advancing
-          # -------------------------------------------------------------
+          # C. Mega-Cap Breadth & DELTA Decoupler Gate
           tickers = ["DELTA.BK", "PTT.BK", "PTTEP.BK", "BDMS.BK", "CPALL.BK"]
           advancing = 0
           breadth_details = []
+          delta_chg = 0.0
           try:
-              breadth_df = yf.download(tickers, period="2d", interval="1d", progress=False)
+              b_df = yf.download(tickers, period="2d", interval="1d", progress=False)
               for t in tickers:
-                  clean_name = t.replace(".BK", "")
+                  clean = t.replace(".BK", "")
                   try:
-                      p_close = float(breadth_df["Close"][t].iloc[-2].squeeze())
-                      c_close = float(breadth_df["Close"][t].iloc[-1].squeeze())
+                      p_close = float(b_df["Close"][t].iloc[-2].squeeze())
+                      c_close = float(b_df["Close"][t].iloc[-1].squeeze())
                       chg = ((c_close - p_close) / p_close) * 100.0
+                      if clean == "DELTA":
+                          delta_chg = chg
                       if chg > 0:
                           advancing += 1
-                          breadth_details.append(f"🟢 {clean_name}: +{chg:.2f}%")
+                          breadth_details.append(f"🟢 {clean}: +{chg:.2f}%")
                       elif chg < 0:
-                          breadth_details.append(f"🔴 {clean_name}: {chg:.2f}%")
+                          breadth_details.append(f"🔴 {clean}: {chg:.2f}%")
                       else:
-                          breadth_details.append(f"⚪ {clean_name}: 0.00%")
+                          breadth_details.append(f"⚪ {clean}: 0.00%")
                   except Exception:
-                      breadth_details.append(f"⚪ {clean_name}: N/A")
+                      breadth_details.append(f"⚪ {clean}: N/A")
           except Exception as e:
               print(f"Error fetching breadth: {e}")
 
           breadth_pass = (advancing >= 3)
+          delta_decoupler_veto = (delta_chg < -1.50)  # Veto longs if DELTA drops > 1.5%
 
           # -------------------------------------------------------------
-          # Evaluate Composite Gate Status
+          # 2. SET50 Technical Indicators (^SET50 proxy)
           # -------------------------------------------------------------
-          all_gates_pass = (not es_veto) and (not thb_veto) and breadth_pass
+          s50_price = 0.0
+          s50_ema20 = 0.0
+          s50_atr = 4.5
+          daily_bullish = False
+
+          try:
+              s50_df = yf.download("^SET50", period="3mo", interval="1d", progress=False)
+              if len(s50_df) >= 20:
+                  c = s50_df["Close"].squeeze()
+                  h = s50_df["High"].squeeze()
+                  l = s50_df["Low"].squeeze()
+
+                  s50_price = float(c.iloc[-1])
+                  ema20_series = c.ewm(span=20, adjust=False).mean()
+                  s50_ema20 = float(ema20_series.iloc[-1])
+                  daily_bullish = s50_price >= s50_ema20
+
+                  # Approximate ATR(14)
+                  tr = pd.concat([
+                      h - l,
+                      (h - c.shift(1)).abs(),
+                      (l - c.shift(1)).abs()
+                  ], axis=1).max(axis=1)
+                  s50_atr = float(tr.rolling(14).mean().iloc[-1])
+                  if np.isnan(s50_atr) or s50_atr < 2.0:
+                      s50_atr = 4.0
+          except Exception as e:
+              print(f"Error fetching ^SET50: {e}")
+              s50_price = 930.0  # Fallback reference
+
+          # Dynamic target sizing from ATR
+          t1_points = max(4.0, round(1.25 * s50_atr, 1))
+
+          # -------------------------------------------------------------
+          # 3. Composite Evaluation
+          # -------------------------------------------------------------
+          all_gates_pass = (
+              (not es_veto) and 
+              (not thb_veto) and 
+              breadth_pass and 
+              (not delta_decoupler_veto) and 
+              daily_bullish
+          )
 
           es_icon = "🔴 VETO" if es_veto else "🟢 PASS"
           thb_icon = "🔴 VETO" if thb_veto else "🟢 PASS"
           breadth_icon = "🟢 PASS" if breadth_pass else "🔴 VETO"
+          delta_icon = "🔴 VETO" if delta_decoupler_veto else "🟢 PASS"
+          trend_icon = "🟢 BULL" if daily_bullish else "🔴 BEAR"
 
           # -------------------------------------------------------------
-          # Build Telegram Notification
+          # 4. Construct Telegram Payload & Execution Ticket
           # -------------------------------------------------------------
           lines = [
-              "⚡ <b>[C2C Engine T - Market Scan]</b>",
+              "⚡ <b>[C2C Engine T - TFEX S50 Scanner]</b>",
               f"📅 <b>Time:</b> {bkk_time} BKK",
               "━━━━━━━━━━━━━━━━━━",
+              f"📈 <b>SET50 Index:</b> {s50_price:.2f} pts [{trend_icon}]",
+              f"• 20-day EMA: {s50_ema20:.2f} | 14-ATR: {s50_atr:.1f} pts",
+              "━━━━━━━━━━━━━━━━━━",
+              "🛡️ <b>INSTITUTIONAL GATE MATRIX:</b>",
               f"• <b>Intermarket (ES=F):</b> {es_pct:+.2f}% [{es_icon}]",
-              f"• <b>FX Slope (USD/THB 5D):</b> {thb_change_pct:+.2f}% [{thb_icon}]",
+              f"• <b>FX Slope (USD/THB):</b> {thb_change_pct:+.2f}% [{thb_icon}]",
               f"• <b>Mega-Cap Breadth:</b> {advancing}/5 Advancing [{breadth_icon}]",
+              f"• <b>DELTA Decoupler:</b> {delta_chg:+.2f}% [{delta_icon}]",
               "  " + " | ".join(breadth_details),
               "━━━━━━━━━━━━━━━━━━"
           ]
 
           if all_gates_pass:
+              entry_ref = s50_price
+              stop_ref = entry_ref - 4.5
+              t1_ref = entry_ref + t1_points
+              t2a_ref = entry_ref + 12.0
+
               lines.extend([
-                  "🎯 <b>REGIME STATUS: GREEN (ALL GATES PASS)</b>",
-                  "• <b>Action:</b> Valid 2H Swing Long setups permitted",
-                  "• <b>Bracket Rules:</b>",
-                  "  - Max Hard Stop: <b>-4.5 pts</b> (Risk cap < 1.0%)",
-                  "  - Tranche 1 (Bank 4 cts): <b>+4.0 pts</b> (ratchet stop to BE)",
-                  "  - Tranche 2A (Runner 3 cts): Limit <b>+12.0 pts</b>",
-                  "  - Tranche 2B (Runner 3 cts): Trail HH - 1.5 ATR"
+                  "🎯 <b>REGIME STATUS: GREEN (EXECUTION AUTHORIZED)</b>",
+                  "📋 <b>ACTIONABLE SETTRADE STREAMING TICKET:</b>",
+                  f"• <b>Contract Series:</b> Current Active Front-Month (S50)",
+                  f"• <b>Position Size:</b> 10 Contracts (฿1.0M Baseline)",
+                  f"• <b>Order Type:</b> Long Limit at <b>{entry_ref:.1f}</b> (Ask +0.4 buffer)",
+                  f"• <b>Initial Hard Stop:</b> <b>{stop_ref:.1f}</b> (-4.5 pts max risk cap)",
+                  "━━━━━━━━━━━━━━━━━━",
+                  "🎯 <b>3-TIER EXIT BRACKETS:</b>",
+                  f"• <b>Tranche 1 (Bank 4 cts):</b> Limit <b>{t1_ref:.1f}</b> (+{t1_points:.1f} pts)",
+                  f"  <i>*Immediate Ratchet: Move stop on remaining 6 cts to {entry_ref:.1f} (BE) upon fill</i>",
+                  f"• <b>Tranche 2A (Fixed 3 cts):</b> Limit <b>{t2a_ref:.1f}</b> (+12.0 pts)",
+                  f"• <b>Tranche 2B (Runner 3 cts):</b> Trail 2H High - {s50_atr * 1.5:.1f} pts",
+                  "• <b>Weekend Rule:</b> Flatten unbanked contracts Friday >16:15"
               ])
           else:
               veto_reasons = []
@@ -142,24 +201,25 @@ jobs:
               if thb_veto:
                   veto_reasons.append("THB Depreciation > +0.30%")
               if not breadth_pass:
-                  veto_reasons.append("Mega-Cap Breadth < 3/5 advancing")
+                  veto_reasons.append("Mega-Cap Breadth < 3/5")
+              if delta_decoupler_veto:
+                  veto_reasons.append("DELTA Drag < -1.50%")
+              if not daily_bullish:
+                  veto_reasons.append("SET50 < EMA(20)")
+
               lines.extend([
                   "⚠️ <b>REGIME STATUS: FILTER VETO ACTIVE</b>",
-                  f"• <b>Vetoed by:</b> {', '.join(veto_reasons)}",
-                  "• <b>Action:</b> Stand down. Long execution suppressed."
+                  f"• <b>Suppressed by:</b> {', '.join(veto_reasons)}",
+                  "• <b>Action:</b> Stand down. Zero long entries authorized."
               ])
 
-          lines.append("<i>Automated pipeline running via GitHub Cloud.</i>")
-          message = "\n".join(lines)
+          lines.append("━━━━━━━━━━━━━━━━━━\n<i>Automated pipeline running via GitHub Cloud.</i>")
+          full_msg = "\n".join(lines)
 
           if token and chat_id:
               url = f"https://api.telegram.org/bot{token}/sendMessage"
-              res = requests.post(
-                  url,
-                  json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"},
-                  timeout=15
-              )
-              print(f"Telegram response: {res.status_code}")
+              res = requests.post(url, json={"chat_id": chat_id, "text": full_msg, "parse_mode": "HTML"}, timeout=15)
+              print(f"Telegram status: {res.status_code}")
           else:
-              print("Missing Telegram secrets.")
+              print("Missing Telegram credentials.")
           EOF
