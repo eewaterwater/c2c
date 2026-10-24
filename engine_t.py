@@ -1,0 +1,194 @@
+import os
+import sys
+import requests
+from datetime import datetime
+import pytz
+import exchange_calendars as xcals
+import yfinance as yf
+import pandas as pd
+import numpy as np
+
+token = os.environ.get("TELEGRAM_BOT_TOKEN")
+chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+event_name = os.environ.get("EVENT_NAME", "workflow_dispatch")
+bkk_now = datetime.now(pytz.timezone("Asia/Bangkok"))
+bkk_date_str = bkk_now.strftime("%Y-%m-%d")
+bkk_time_str = bkk_now.strftime("%Y-%m-%d %H:%M:%S")
+
+# 0. SET / TFEX Market Calendar Check
+xbkk = xcals.get_calendar("XBKK")
+is_market_open_today = xbkk.is_session(bkk_date_str)
+
+if not is_market_open_today and event_name == "schedule":
+    msg = (
+        f"⏸️ <b>[C2C Engine T - Market Closed]</b>\n"
+        f"📅 <b>Date:</b> {bkk_date_str} (BKK)\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"• <b>Status:</b> SET / TFEX is closed today (Holiday/Weekend).\n"
+        f"• <b>Action:</b> Standing down. No scan executed.\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"<i>Automated pipeline running via GitHub Cloud.</i>"
+    )
+    if token and chat_id:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML", "disable_notification": True},
+            timeout=15
+        )
+    sys.exit(0)
+
+notice_header = ""
+if not is_market_open_today:
+    notice_header = "⚠️ <b>[TEST MODE: SET Closed Today - Using Prior Close]</b>\n"
+
+def safe_get_series(ticker, period="5d"):
+    try:
+        df = yf.download(ticker, period=period, interval="1d", progress=False)
+        if df is not None and not df.empty:
+            if isinstance(df.columns, pd.MultiIndex):
+                return df["Close"].iloc[:, 0].dropna().values
+            return df["Close"].dropna().values
+    except Exception as e:
+        print(f"Warning {ticker}: {e}")
+    return np.array([])
+
+# 1. Asian E-mini S&P (ES=F)
+es_veto = False
+es_pct = 0.0
+c_es = safe_get_series("ES=F", "5d")
+if len(c_es) >= 2:
+    es_pct = float(((c_es[-1] - c_es[-2]) / c_es[-2]) * 100.0)
+    if es_pct <= -0.60:
+        es_veto = True
+
+# 2. USD/THB FX Gate
+thb_veto = False
+thb_chg = 0.0
+c_thb = safe_get_series("THB=X", "10d")
+if len(c_thb) >= 5:
+    thb_chg = float(((c_thb[-1] - c_thb[-5]) / c_thb[-5]) * 100.0)
+    if thb_chg > 0.30:
+        thb_veto = True
+
+# 3. Breadth & DELTA Decoupler
+tickers = ["DELTA.BK", "PTT.BK", "PTTEP.BK", "BDMS.BK", "CPALL.BK"]
+advancing = 0
+breadth_details = []
+delta_chg = 0.0
+
+for t in tickers:
+    clean = t.replace(".BK", "")
+    c_t = safe_get_series(t, "5d")
+    if len(c_t) >= 2:
+        chg = float(((c_t[-1] - c_t[-2]) / c_t[-2]) * 100.0)
+        if clean == "DELTA":
+            delta_chg = chg
+        if chg > 0:
+            advancing += 1
+            breadth_details.append(f"🟢 {clean}: {chg:+.2f}%")
+        elif chg < 0:
+            breadth_details.append(f"🔴 {clean}: {chg:+.2f}%")
+        else:
+            breadth_details.append(f"⚪ {clean}: 0.00%")
+    else:
+        breadth_details.append(f"⚪ {clean}: Flat")
+
+breadth_pass = (advancing >= 3)
+delta_veto = (delta_chg < -1.50)
+
+# 4. S50 Cash Index Trend & ATR
+s50_price = 930.0
+s50_ema20 = 925.0
+s50_atr = 4.5
+daily_bullish = True
+
+c_s50 = safe_get_series("^SET50", "3mo")
+if len(c_s50) >= 20:
+    s50_price = float(c_s50[-1])
+    s_ema = pd.Series(c_s50).ewm(span=20, adjust=False).mean()
+    s50_ema20 = float(s_ema.iloc[-1])
+    daily_bullish = s50_price >= s50_ema20
+
+all_pass = (not es_veto) and (not thb_veto) and breadth_pass and (not delta_veto) and daily_bullish
+is_silent = not all_pass
+
+es_icon = "🔴 VETO" if es_veto else "🟢 PASS"
+thb_icon = "🔴 VETO" if thb_veto else "🟢 PASS"
+breadth_icon = "🟢 PASS" if breadth_pass else "🔴 VETO"
+delta_icon = "🔴 VETO" if delta_veto else "🟢 PASS"
+trend_icon = "🟢 BULL" if daily_bullish else "🔴 BEAR"
+
+lines = []
+if notice_header:
+    lines.append(notice_header)
+
+title_tag = "🚨 <b>[ACTION REQUIRED: TFEX S50 LONG]</b>" if all_pass else "⚡ <b>[C2C Engine T - Market Scan]</b>"
+lines.extend([
+    title_tag,
+    f"📅 <b>Time:</b> {bkk_time_str} BKK",
+    "━━━━━━━━━━━━━━━━━━",
+    f"📈 <b>SET50 Index:</b> {s50_price:.2f} pts [{trend_icon}]",
+    f"• 20-day EMA: {s50_ema20:.2f} | 14-ATR: {s50_atr:.1f} pts",
+    "━━━━━━━━━━━━━━━━━━",
+    "🛡️ <b>INSTITUTIONAL GATE MATRIX:</b>",
+    f"• <b>Intermarket (ES=F):</b> {es_pct:+.2f}% [{es_icon}]",
+    f"• <b>FX Slope (USD/THB):</b> {thb_chg:+.2f}% [{thb_icon}]",
+    f"• <b>Mega-Cap Breadth:</b> {advancing}/5 Advancing [{breadth_icon}]",
+    f"• <b>DELTA Decoupler:</b> {delta_chg:+.2f}% [{delta_icon}]",
+    "  " + " | ".join(breadth_details),
+    "━━━━━━━━━━━━━━━━━━"
+])
+
+if all_pass:
+    lines.extend([
+        "🎯 <b>REGIME STATUS: GREEN (AUTHORIZED)</b>",
+        "📋 <b>SETTRADE BRACKET TICKET:</b>",
+        f"• Size: <b>10 Contracts</b> (฿1.0M Baseline)",
+        f"• Long Limit: <b>{s50_price:.1f}</b>",
+        f"• Hard Stop: <b>{s50_price - 4.5:.1f}</b> (-4.5 pts cap)",
+        f"• <b>T1 (Bank 4 cts):</b> <b>{s50_price + 4.5:.1f}</b> (+4.5 pts &gt;&gt; Move stop to BE)",
+        f"• <b>T2A (Fixed 3 cts):</b> <b>{s50_price + 12.0:.1f}</b> (+12.0 pts)",
+        f"• <b>T2B (Runner 3 cts):</b> Trail 2H High - 6.0 pts"
+    ])
+else:
+    vetos = []
+    if es_veto: vetos.append("ES Drop &le; -0.60%")
+    if thb_veto: vetos.append("THB Depreciation &gt; +0.30%")
+    if not breadth_pass: vetos.append("Breadth &lt; 3/5")
+    if delta_veto: vetos.append("DELTA Drag &lt; -1.50%")
+    if not daily_bullish: vetos.append("SET50 &lt; EMA(20)")
+    lines.extend([
+        "⚠️ <b>REGIME STATUS: FILTER VETO ACTIVE</b>",
+        f"• <b>Suppressed by:</b> {', '.join(vetos)}",
+        "• <b>Action:</b> Stand down. Long execution suppressed. <i>(Silent notification)</i>"
+    ])
+
+lines.append("━━━━━━━━━━━━━━━━━━\n<i>Automated pipeline running via GitHub Cloud.</i>")
+full_msg = "\n".join(lines)
+
+# Direct TradingView S501! Chart and InnovestX Deep Link
+keyboard = {
+    "inline_keyboard": [
+        [
+            {"text": "📈 S50 Futures Chart", "url": "https://www.tradingview.com/chart/?symbol=TFEX%3AS501!"},
+            {"text": "📲 Open InnovestX", "url": "https://market.android.com/details?id=com.scb.easyinvest"}
+        ]
+    ]
+}
+
+if token and chat_id:
+    res = requests.post(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        json={
+            "chat_id": chat_id,
+            "text": full_msg,
+            "parse_mode": "HTML",
+            "disable_notification": is_silent,
+            "reply_markup": keyboard
+        },
+        timeout=15
+    )
+    print(f"Telegram status: {res.status_code}")
+else:
+    print("Missing Telegram credentials.")
+  
