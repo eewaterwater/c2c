@@ -5,11 +5,27 @@ on:
     # 13:00 UTC = 20:00 Bangkok Time (Mon-Fri pre-US cash open)
     - cron: '0 13 * * 1-5'
   workflow_dispatch:
+    inputs:
+      trade_outcome:
+        description: 'Update trade outcome (win / stopout / reset / none)'
+        required: false
+        default: 'none'
+        type: choice
+        options:
+          - none
+          - win
+          - stopout
+          - reset
 
 jobs:
   scan-equities:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -20,15 +36,17 @@ jobs:
           pip install --upgrade pip
           pip install requests yfinance pandas numpy pytz exchange_calendars
 
-      - name: Run Macro Classifier & High-Velocity DR Scanner
+      - name: Run Macro Classifier, State Engine & DR Scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           EVENT_NAME: ${{ github.event_name }}
+          INPUT_OUTCOME: ${{ github.event.inputs.trade_outcome }}
         run: |
           python - << 'EOF'
           import os
           import sys
+          import json
           import requests
           from datetime import datetime
           import pytz
@@ -40,6 +58,7 @@ jobs:
           token = os.environ.get("TELEGRAM_BOT_TOKEN")
           chat_id = os.environ.get("TELEGRAM_CHAT_ID")
           event_name = os.environ.get("EVENT_NAME", "workflow_dispatch")
+          trade_outcome = os.environ.get("INPUT_OUTCOME", "none")
 
           bkk_now = datetime.now(pytz.timezone("Asia/Bangkok"))
           ny_now = datetime.now(pytz.timezone("America/New_York"))
@@ -47,12 +66,68 @@ jobs:
           bkk_time_str = bkk_now.strftime("%Y-%m-%d %H:%M:%S")
 
           # -------------------------------------------------------------
-          # 0. US Market Calendar Gate (XNYS)
+          # 1. Load and Update Persistent State (state.json)
+          # -------------------------------------------------------------
+          state_path = "state.json"
+          state = {
+              "consecutive_wins": 0,
+              "daily_stopouts": 0,
+              "weekly_stopouts": 0,
+              "last_trade_date": ny_date_str,
+              "active_position": None
+          }
+          if os.path.exists(state_path):
+              try:
+                  with open(state_path, "r") as f:
+                      state = json.load(f)
+              except Exception as e:
+                  print(f"Warning reading state.json: {e}")
+
+          # Reset daily counters if new day
+          if state.get("last_trade_date") != ny_date_str:
+              state["daily_stopouts"] = 0
+              state["last_trade_date"] = ny_date_str
+
+          # Handle manual outcome inputs if triggered from UI
+          if trade_outcome == "win":
+              state["consecutive_wins"] = state.get("consecutive_wins", 0) + 1
+              state["daily_stopouts"] = 0
+          elif trade_outcome == "stopout":
+              state["consecutive_wins"] = 0
+              state["daily_stopouts"] = state.get("daily_stopouts", 0) + 1
+              state["weekly_stopouts"] = state.get("weekly_stopouts", 0) + 1
+          elif trade_outcome == "reset":
+              state["consecutive_wins"] = 0
+              state["daily_stopouts"] = 0
+              state["weekly_stopouts"] = 0
+
+          # Save state back immediately
+          try:
+              with open(state_path, "w") as f:
+                  json.dump(state, f, indent=2)
+          except Exception as e:
+              print(f"Warning saving state.json: {e}")
+
+          # Circuit Breaker Check
+          circuit_breaker_active = False
+          circuit_reason = ""
+          if state.get("daily_stopouts", 0) >= 2:
+              circuit_breaker_active = True
+              circuit_reason = "Daily Stop-Out Limit Reached (2 consecutive)"
+          elif state.get("weekly_stopouts", 0) >= 3:
+              circuit_breaker_active = True
+              circuit_reason = "Weekly Stop-Out Limit Reached (3 stops in rolling week)"
+
+          # Sizing multiplier from win-streaks (Playbook 1)
+          win_streak = state.get("consecutive_wins", 0)
+          streak_boost = win_streak >= 3
+
+          # -------------------------------------------------------------
+          # 2. US Market Calendar Gate (XNYS)
           # -------------------------------------------------------------
           xnys = xcals.get_calendar("XNYS")
           is_us_open_today = xnys.is_session(ny_date_str)
 
-          # If scheduled cron fires on US holiday/weekend: notify and stand down
           if not is_us_open_today and event_name == "schedule":
               msg = (
                   f"⏸️ <b>[C2C Engine E - US Markets Closed]</b>\n"
@@ -80,7 +155,7 @@ jobs:
               return df["Close"].dropna().values
 
           # -------------------------------------------------------------
-          # 1. Fetch USD/THB
+          # 3. USD/THB Ingestion
           # -------------------------------------------------------------
           usd_thb = 35.0
           try:
@@ -92,14 +167,14 @@ jobs:
               print(f"FX Error: {e}")
 
           # -------------------------------------------------------------
-          # 2. Macro Regime (QQQ)
+          # 4. Macro Regime Classifier & Dynamic Sizing
           # -------------------------------------------------------------
           regime_name = "Regime 3: Rangebound Chop"
           regime_icon = "🟡"
           r_thb = 15000.0
           r_label = "0.50R (฿15,000 THB)"
           vault_a_alloc = "35% QQQ / 25% SMH / 40% SGOV"
-          risk_authorized = True
+          risk_authorized = not circuit_breaker_active
           qqq_3d_ret = 0.0
 
           try:
@@ -124,8 +199,12 @@ jobs:
                   elif p_now > p_ema20 > p_ema50 > p_sma200:
                       regime_name = "Regime 1: Confirmed Bull"
                       regime_icon = "🟢"
-                      r_thb = 30000.0
-                      r_label = "1.0R (฿30,000 THB)"
+                      if streak_boost:
+                          r_thb = 45000.0
+                          r_label = f"1.50R (฿45,000 THB) 🔥 [Streak: {win_streak}W]"
+                      else:
+                          r_thb = 30000.0
+                          r_label = "1.00R (฿30,000 THB)"
                       vault_a_alloc = "55% QQQ / 35% SMH / 10% SGOV"
                   elif p_now < p_ema20 and p_now > p_sma200:
                       regime_name = "Regime 2: Bull Pullback"
@@ -142,8 +221,13 @@ jobs:
           except Exception as e:
               print(f"Macro error: {e}")
 
+          if circuit_breaker_active:
+              r_thb = 0.0
+              r_label = f"0.0R (HALTED: {circuit_reason})"
+              risk_authorized = False
+
           # -------------------------------------------------------------
-          # 3. Watchpool DR Details (SET Ratios)
+          # 5. Watchpool DR Candidates & Compression Scan
           # -------------------------------------------------------------
           watchpool = [
               {"ticker": "NVDA", "dr": "NVDA80X", "ratio": 200},
@@ -263,6 +347,8 @@ jobs:
                   settrade_copy_blocks.append(
                       f"<code>BUY {p['dr']} @ ฿{entry_thb:.2f} | Vol: {units:,} | Stop: ฿{stop_thb:.2f}</code>"
                   )
+          elif circuit_breaker_active:
+              ticket_blocks.append(f"⛔ <b>CIRCUIT BREAKER TRIGGERED:</b>\n• {circuit_reason}\n• All new buy orders suppressed.")
           else:
               ticket_blocks.append("📋 <b>EXECUTION:</b> Zero breakout setups qualified. Retain cash in MMF.")
 
@@ -278,6 +364,7 @@ jobs:
               f"📊 <b>MACRO REGIME:</b> {regime_icon} <b>{regime_name}</b>",
               f"• <b>Risk Budget:</b> <b>{r_label}</b>",
               f"• <b>Vault A Target:</b> <code>{vault_a_alloc}</code>",
+              f"• <b>State:</b> Win Streak: <b>{win_streak}</b> | Daily Stops: <b>{state.get('daily_stopouts', 0)}/2</b>",
               "━━━━━━━━━━━━━━━━━━",
               "🔍 <b>WATCHPOOL METRICS:</b>",
               "\n".join(summary_lines) if summary_lines else "• Data pending",
@@ -297,3 +384,10 @@ jobs:
                                   json={"chat_id": chat_id, "text": full_msg, "parse_mode": "HTML"}, timeout=15)
               print(f"Telegram status: {res.status_code}")
           EOF
+
+      - name: Commit Updated State
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          git diff --quiet && git diff --staged --quiet || (git commit -m "chore(state): update trade engine state [skip ci]" && git push)
