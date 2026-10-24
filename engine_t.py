@@ -100,47 +100,76 @@ short_breadth_pass = (declining >= 3)
 long_delta_pass = (delta_chg >= -1.50)
 short_delta_pass = (delta_chg <= 1.50)
 
-# 4. SET50 Cash Structure, ATR, and 15M MSS Trigger
+# 4. Multi-Timeframe Structure & Playbook Layer Calculations
 s50_price = 930.0
 s50_daily_ema20 = 925.0
 s50_15m_ema20 = 928.0
 s50_rsi15m = 50.0
 s50_atr = 4.5
+daily_adx = 22.0
+plus_di = 25.0
+minus_di = 20.0
 daily_bullish = True
 daily_bearish = False
 mss_15m_long = False
 mss_15m_short = False
+prior_vah = 928.0
+prior_val = 920.0
 
-# Robust Daily Trend & ATR
+# Layer A: Daily Trend, ATR, & ADX Filter
 try:
-    df_d = yf.download("^SET50", period="3mo", interval="1d", progress=False)
+    df_d = yf.download("^SET50", period="6mo", interval="1d", progress=False)
     if df_d is not None and not df_d.empty:
         c_series = df_d["Close"].iloc[:, 0] if isinstance(df_d.columns, pd.MultiIndex) else df_d["Close"]
         h_series = df_d["High"].iloc[:, 0] if isinstance(df_d.columns, pd.MultiIndex) else df_d["High"]
         l_series = df_d["Low"].iloc[:, 0] if isinstance(df_d.columns, pd.MultiIndex) else df_d["Low"]
-        
+
         c_vals = c_series.dropna().values
         h_vals = h_series.dropna().values
         l_vals = l_series.dropna().values
 
-        if len(c_vals) >= 20:
+        if len(c_vals) >= 30:
             s50_price = float(c_vals[-1])
             ema_series = pd.Series(c_vals).ewm(span=20, adjust=False).mean()
             s50_daily_ema20 = float(ema_series.iloc[-1])
             daily_bullish = s50_price >= s50_daily_ema20
             daily_bearish = s50_price < s50_daily_ema20
 
-            # Safe numpy-based ATR calculation
+            # Prior Day Value Area (VAH / VAL 70% Distribution)
+            if len(h_vals) >= 2:
+                prev_h = h_vals[-2]
+                prev_l = l_vals[-2]
+                prev_rng = prev_h - prev_l
+                prior_vah = prev_h - (prev_rng * 0.15)
+                prior_val = prev_l + (prev_rng * 0.15)
+
+            # ATR Calculation
             tr_list = []
             for k in range(1, len(c_vals)):
                 tr_val = max(h_vals[k] - l_vals[k], abs(h_vals[k] - c_vals[k-1]), abs(l_vals[k] - c_vals[k-1]))
                 tr_list.append(tr_val)
             if len(tr_list) >= 14:
                 s50_atr = max(float(np.mean(tr_list[-14:])), 3.5)
-except Exception as e:
-    print(f"Daily/ATR calculation error: {e}")
 
-# 15M MSS Trigger Check
+            # Daily ADX(14)
+            df_adx = pd.DataFrame({"High": h_vals, "Low": l_vals, "Close": c_vals})
+            up = df_adx["High"].diff()
+            down = -df_adx["Low"].diff()
+            p_dm = np.where((up > down) & (up > 0), up, 0.0)
+            m_dm = np.where((down > up) & (down > 0), down, 0.0)
+            tr_s = pd.Series(tr_list)
+            p_di_s = 100.0 * (pd.Series(p_dm[1:]).rolling(14).sum() / (tr_s.rolling(14).sum() + 1e-9))
+            m_di_s = 100.0 * (pd.Series(m_dm[1:]).rolling(14).sum() / (tr_s.rolling(14).sum() + 1e-9))
+            dx_s = 100.0 * ((p_di_s - m_di_s).abs() / ((p_di_s + m_di_s).abs() + 1e-9))
+            adx_val = dx_s.rolling(14).mean().iloc[-1]
+            if not np.isnan(adx_val):
+                daily_adx = float(adx_val)
+                plus_di = float(p_di_s.iloc[-1])
+                minus_di = float(m_di_s.iloc[-1])
+except Exception as e:
+    print(f"Daily/ADX calculation error: {e}")
+
+# Layer B & C: 15M MSS Trigger & Zone of Interest (ZOI)
 try:
     df_15m = yf.download("^SET50", period="5d", interval="15m", progress=False)
     if df_15m is not None and not df_15m.empty:
@@ -161,7 +190,7 @@ try:
 except Exception as e:
     print(f"15M calculation error: {e}")
 
-# Basis Clamping: Basis = Futures Price - Cash Index
+# Layer D: Futures Basis Clamping
 basis_delta = 0.5
 try:
     c_fut = safe_get_series("0840.HK", "5d", "1d")
@@ -175,14 +204,30 @@ except Exception:
 basis_pass_long = (basis_delta < 5.5)
 basis_pass_short = (basis_delta > -3.5)
 
-# 5. Dual Direction Evaluation
-is_long_authorized = (long_es_pass and long_thb_pass and long_breadth_pass and long_delta_pass and daily_bullish and mss_15m_long and basis_pass_long)
-is_short_authorized = (short_es_pass and short_thb_pass and short_breadth_pass and short_delta_pass and daily_bearish and mss_15m_short and basis_pass_short)
+# Value Area & ZOI Acceptance Gates
+va_pass_long = (s50_price >= prior_vah)
+va_pass_short = (s50_price <= prior_val)
+zoi_pass = abs(s50_price - s50_daily_ema20) <= (s50_atr * 0.75)
+adx_pass = (daily_adx >= 20.0)
+
+# Unified Institutional Rule Matrix
+is_long_authorized = (
+    long_es_pass and long_thb_pass and long_breadth_pass and long_delta_pass and
+    daily_bullish and mss_15m_long and basis_pass_long and adx_pass and
+    (plus_di > minus_di) and va_pass_long and zoi_pass
+)
+
+is_short_authorized = (
+    short_es_pass and short_thb_pass and short_breadth_pass and short_delta_pass and
+    daily_bearish and mss_15m_short and basis_pass_short and adx_pass and
+    (minus_di > plus_di) and va_pass_short and zoi_pass
+)
 
 has_actionable_signal = is_long_authorized or is_short_authorized
 is_silent = not has_actionable_signal
 
 trend_icon = "🟢 BULL" if daily_bullish else "🔴 BEAR"
+adx_icon = "🟢 TRENDING" if daily_adx >= 20.0 else "🟡 CHOP/FLAT"
 mss_icon = "🟢 BULL MSS" if mss_15m_long else ("🔴 BEAR MSS" if mss_15m_short else "⚪ NEUTRAL")
 basis_icon = "🟢 NORMAL" if (-3.5 < basis_delta < 5.5) else ("🔴 HIGH PREMIUM" if basis_delta >= 5.5 else "🔴 DEEP DISCOUNT")
 
@@ -203,8 +248,8 @@ lines.extend([
     "━━━━━━━━━━━━━━━━━━",
     f"📈 <b>SET50 Index:</b> {s50_price:.2f} pts [{trend_icon}]",
     f"• Daily EMA(20): {s50_daily_ema20:.2f} | 15M EMA(20): {s50_15m_ema20:.2f}",
-    f"• 15M Momentum: RSI(14) = {s50_rsi15m:.1f} [{mss_icon}]",
-    f"• Futures Basis: {basis_delta:+.1f} pts [{basis_icon}] | ATR(14): {s50_atr:.1f} pts",
+    f"• ADX(14): {daily_adx:.1f} [{adx_icon}] | 15M RSI: {s50_rsi15m:.1f} [{mss_icon}]",
+    f"• Value Area: VAH {prior_vah:.1f} / VAL {prior_val:.1f} | Basis: {basis_delta:+.1f} pts [{basis_icon}]",
     "━━━━━━━━━━━━━━━━━━",
     "🛡️ <b>INSTITUTIONAL GATE MATRIX:</b>",
     f"• <b>Intermarket (ES=F):</b> {es_pct:+.2f}%",
@@ -215,38 +260,40 @@ lines.extend([
     "━━━━━━━━━━━━━━━━━━"
 ])
 
-long_t1 = round(s50_price + 5.5, 1)
+# Master Plan Asymmetric Targets & Dynamic Chandelier ATR
+long_t1 = round(s50_price + max(5.5, s50_atr * 1.25), 1)
 short_t1 = round(s50_price - 4.5, 1)
 long_t2a = round(s50_price + 12.0, 1)
 short_t2a = round(s50_price - 14.0, 1)
 chandelier_long = round(s50_price - (1.5 * s50_atr), 1)
 chandelier_short = round(s50_price + (1.5 * s50_atr), 1)
+stop_distance = round(min(s50_atr * 0.75, 4.5), 1)
 
 if is_long_authorized:
     lines.extend([
         "🎯 <b>REGIME STATUS: GREEN (LONG AUTHORIZED)</b>",
         "📋 <b>INSTITUTIONAL MASTER TICKET (10 Contracts):</b>",
         f"• Order: <b>BUY OPEN 10 Contracts</b> (฿1.0M Baseline)",
-        f"• Limit Entry: <b>{s50_price:.1f}</b>",
-        f"• Hard Stop: <b>{s50_price - 4.5:.1f}</b> (-4.5 pts cap)",
-        f"• <b>Tranche 1 (Bank 4 cts):</b> Limit <b>{long_t1:.1f}</b> (+5.5 pts &gt;&gt; Move stop to BE)",
+        f"• Limit Entry: <b>{s50_price:.1f}</b> (In ZOI)",
+        f"• Hard Stop: <b>{s50_price - stop_distance:.1f}</b> (-{stop_distance} pts structural cap)",
+        f"• <b>Tranche 1 (Bank 4 cts):</b> Limit <b>{long_t1:.1f}</b> (+{long_t1-s50_price:.1f} pts &gt;&gt; Move stop to BE)",
         f"• <b>Tranche 2A (Fixed 3 cts):</b> Limit <b>{long_t2a:.1f}</b> (+12.0 pts)",
         f"• <b>Tranche 2B (Runner 3 cts):</b> Chandelier Trail &gt;&gt; High - {1.5*s50_atr:.1f} pts (Initial: <b>{chandelier_long:.1f}</b>)",
         "━━━━━━━━━━━━━━━━━━",
         "🔥 <b>HOUSE MONEY PYRAMID TICKET (+2 Contracts):</b>",
-        f"• Trigger: After T1 banks (+5.5 pts), place <b>BUY OPEN +2 cts</b> on next 15M breakout.",
+        f"• Trigger: After T1 banks (+{long_t1-s50_price:.1f} pts), place <b>BUY OPEN +2 cts</b> on next 15M breakout.",
         f"• Anchor Stop: <b>{s50_price:.1f}</b> (Breakeven). 100% financed by T1 banked profit.",
         "━━━━━━━━━━━━━━━━━━",
         "📲 <b>QUICK ORDER:</b>",
-        f"<code>BUY OPEN S50 10 cts @ {s50_price:.1f} | Stop: {s50_price - 4.5:.1f}</code>"
+        f"<code>BUY OPEN S50 10 cts @ {s50_price:.1f} | Stop: {s50_price - stop_distance:.1f}</code>"
     ])
 elif is_short_authorized:
     lines.extend([
         "🎯 <b>REGIME STATUS: RED (SHORT AUTHORIZED)</b>",
         "📋 <b>INSTITUTIONAL MASTER TICKET (10 Contracts):</b>",
         f"• Order: <b>SELL OPEN (SHORT) 10 Contracts</b> (฿1.0M Baseline)",
-        f"• Limit Entry: <b>{s50_price:.1f}</b>",
-        f"• Hard Stop: <b>{s50_price + 4.5:.1f}</b> (+4.5 pts cap)",
+        f"• Limit Entry: <b>{s50_price:.1f}</b> (In ZOI)",
+        f"• Hard Stop: <b>{s50_price + stop_distance:.1f}</b> (+{stop_distance} pts structural cap)",
         f"• <b>Tranche 1 (Bank 4 cts):</b> Limit <b>{short_t1:.1f}</b> (-4.5 pts &gt;&gt; Move stop to BE)",
         f"• <b>Tranche 2A (Fixed 3 cts):</b> Limit <b>{short_t2a:.1f}</b> (-14.0 pts extended impulse)",
         f"• <b>Tranche 2B (Runner 3 cts):</b> Chandelier Trail &gt;&gt; Low + {1.5*s50_atr:.1f} pts (Initial: <b>{chandelier_short:.1f}</b>)",
@@ -256,19 +303,22 @@ elif is_short_authorized:
         f"• Anchor Stop: <b>{s50_price:.1f}</b> (Breakeven). 100% financed by T1 banked profit.",
         "━━━━━━━━━━━━━━━━━━",
         "📲 <b>QUICK ORDER:</b>",
-        f"<code>SELL OPEN S50 10 cts @ {s50_price:.1f} | Stop: {s50_price + 4.5:.1f}</code>"
+        f"<code>SELL OPEN S50 10 cts @ {s50_price:.1f} | Stop: {s50_price + stop_distance:.1f}</code>"
     ])
 else:
     reasons = []
-    if not basis_pass_long and not basis_pass_short: reasons.append("Basis Clamped")
-    if not (long_breadth_pass or short_breadth_pass): reasons.append("Breadth Split")
-    if not (long_delta_pass and short_delta_pass): reasons.append("DELTA Bias Conflict")
+    if not adx_pass: reasons.append(f"ADX < 20 ({daily_adx:.1f} Low Momentum)")
+    if not (va_pass_long or va_pass_short): reasons.append("Inside Prior Value Area (Chop)")
+    if not zoi_pass: reasons.append("Extended Beyond ZOI (No Chasing)")
+    if not basis_pass_long and not basis_pass_short: reasons.append("Futures Basis Clamped")
+    if not (long_breadth_pass or short_breadth_pass): reasons.append("Mega-Cap Breadth Split")
+    if not (long_delta_pass and short_delta_pass): reasons.append("DELTA Decoupler Bias")
     if not (mss_15m_long or mss_15m_short): reasons.append("15M MSS Neutral")
-    if not reasons: reasons.append("Market in Neutral Band")
+    if not reasons: reasons.append("Regime Filter Neutral")
     lines.extend([
         "⚠️ <b>REGIME STATUS: FILTER VETO ACTIVE</b>",
         f"• <b>Reason:</b> {', '.join(reasons)}",
-        "• <b>Action:</b> Stand down. Zero directional edge. <i>(Silent notification)</i>"
+        "• <b>Action:</b> Stand down. Zero edge. <i>(Silent notification)</i>"
     ])
 
 lines.append("━━━━━━━━━━━━━━━━━━\n<i>Automated pipeline running via GitHub Cloud.</i>")
