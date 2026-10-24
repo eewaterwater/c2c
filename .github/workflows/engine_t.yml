@@ -52,7 +52,7 @@ jobs:
           xbkk = xcals.get_calendar("XBKK")
           is_market_open_today = xbkk.is_session(bkk_date_str)
 
-          # If scheduled cron fires on holiday/weekend: notify and stand down
+          # Holiday: Silent stand-down notification
           if not is_market_open_today and event_name == "schedule":
               msg = (
                   f"⏸️ <b>[C2C Engine T - Market Closed]</b>\n"
@@ -64,17 +64,17 @@ jobs:
                   f"<i>Automated pipeline running via GitHub Cloud.</i>"
               )
               if token and chat_id:
-                  requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                                json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}, timeout=15)
+                  requests.post(
+                      f"https://api.telegram.org/bot{token}/sendMessage",
+                      json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML", "disable_notification": True},
+                      timeout=15
+                  )
               sys.exit(0)
 
           notice_header = ""
           if not is_market_open_today:
               notice_header = "⚠️ <b>[TEST MODE: SET Closed Today - Using Prior Close]</b>\n"
 
-          # -------------------------------------------------------------
-          # Helper Function for Safe Data Fetch
-          # -------------------------------------------------------------
           def safe_get_series(ticker, period="5d"):
               try:
                   df = yf.download(ticker, period=period, interval="1d", progress=False)
@@ -153,6 +153,11 @@ jobs:
 
           all_pass = (not es_veto) and (not thb_veto) and breadth_pass and (not delta_veto) and daily_bullish
 
+          # Sound triage rule:
+          # If all gates pass -> Loud Alert (disable_notification = False)
+          # If vetoed -> Silent Delivery (disable_notification = True)
+          is_silent = not all_pass
+
           es_icon = "🔴 VETO" if es_veto else "🟢 PASS"
           thb_icon = "🔴 VETO" if thb_veto else "🟢 PASS"
           breadth_icon = "🟢 PASS" if breadth_pass else "🔴 VETO"
@@ -163,8 +168,9 @@ jobs:
           if notice_header:
               lines.append(notice_header)
 
+          title_tag = "🚨 <b>[ACTION REQUIRED: TFEX S50 LONG]</b>" if all_pass else "⚡ <b>[C2C Engine T - Market Scan]</b>"
           lines.extend([
-              "⚡ <b>[C2C Engine T - TFEX S50 Scanner]</b>",
+              title_tag,
               f"📅 <b>Time:</b> {bkk_time_str} BKK",
               "━━━━━━━━━━━━━━━━━━",
               f"📈 <b>SET50 Index:</b> {s50_price:.2f} pts [{trend_icon}]",
@@ -200,7 +206,7 @@ jobs:
               lines.extend([
                   "⚠️ <b>REGIME STATUS: FILTER VETO ACTIVE</b>",
                   f"• <b>Suppressed by:</b> {', '.join(vetos)}",
-                  "• <b>Action:</b> Stand down. Zero long entries authorized."
+                  "• <b>Action:</b> Stand down. Long execution suppressed. <i>(Silent notification)</i>"
               ])
 
           lines.append("━━━━━━━━━━━━━━━━━━\n<i>Automated pipeline running via GitHub Cloud.</i>")
@@ -209,8 +215,13 @@ jobs:
           if token and chat_id:
               res = requests.post(
                   f"https://api.telegram.org/bot{token}/sendMessage",
-                  json={"chat_id": chat_id, "text": full_msg, "parse_mode": "HTML"},
+                  json={
+                      "chat_id": chat_id,
+                      "text": full_msg,
+                      "parse_mode": "HTML",
+                      "disable_notification": is_silent
+                  },
                   timeout=15
               )
-              print(f"Telegram status: {res.status_code}")
+              print(f"Telegram status: {res.status_code} | Silent Mode: {is_silent}")
           EOF
