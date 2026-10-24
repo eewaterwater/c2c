@@ -18,25 +18,59 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install --upgrade pip
-          pip install requests yfinance pandas numpy pytz
+          pip install requests yfinance pandas numpy pytz exchange_calendars
 
       - name: Run Macro Classifier & High-Velocity DR Scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           python - << 'EOF'
           import os
+          import sys
           import requests
           from datetime import datetime
           import pytz
+          import exchange_calendars as xcals
           import yfinance as yf
           import pandas as pd
           import numpy as np
 
           token = os.environ.get("TELEGRAM_BOT_TOKEN")
           chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-          bkk_time = datetime.now(pytz.timezone("Asia/Bangkok")).strftime("%Y-%m-%d %H:%M:%S")
+          event_name = os.environ.get("EVENT_NAME", "workflow_dispatch")
+
+          bkk_now = datetime.now(pytz.timezone("Asia/Bangkok"))
+          ny_now = datetime.now(pytz.timezone("America/New_York"))
+          ny_date_str = ny_now.strftime("%Y-%m-%d")
+          bkk_time_str = bkk_now.strftime("%Y-%m-%d %H:%M:%S")
+
+          # -------------------------------------------------------------
+          # 0. US Market Calendar Gate (XNYS)
+          # -------------------------------------------------------------
+          xnys = xcals.get_calendar("XNYS")
+          is_us_open_today = xnys.is_session(ny_date_str)
+
+          # If scheduled cron fires on US holiday/weekend: notify and stand down
+          if not is_us_open_today and event_name == "schedule":
+              msg = (
+                  f"⏸️ <b>[C2C Engine E - US Markets Closed]</b>\n"
+                  f"📅 <b>Date:</b> {ny_date_str} (US)\n"
+                  f"━━━━━━━━━━━━━━━━━━\n"
+                  f"• <b>Status:</b> NYSE / NASDAQ is closed today (Holiday/Weekend).\n"
+                  f"• <b>Action:</b> Standing down. No US DR scan executed.\n"
+                  f"━━━━━━━━━━━━━━━━━━\n"
+                  f"<i>Automated pipeline running via GitHub Cloud.</i>"
+              )
+              if token and chat_id:
+                  requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                                json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}, timeout=15)
+              sys.exit(0)
+
+          notice_header = ""
+          if not is_us_open_today:
+              notice_header = "⚠️ <b>[TEST MODE: US Market Closed Today - Using Prior Close]</b>\n"
 
           def safe_series(df):
               if df is None or df.empty:
@@ -45,9 +79,9 @@ jobs:
                   return df["Close"].iloc[:, 0].dropna().values
               return df["Close"].dropna().values
 
-          # ------------------------------------------------------------------
-          # 1. Fetch USD/THB Exchange Rate
-          # ------------------------------------------------------------------
+          # -------------------------------------------------------------
+          # 1. Fetch USD/THB
+          # -------------------------------------------------------------
           usd_thb = 35.0
           try:
               thb_df = yf.download("THB=X", period="5d", interval="1d", progress=False)
@@ -57,9 +91,9 @@ jobs:
           except Exception as e:
               print(f"FX Error: {e}")
 
-          # ------------------------------------------------------------------
-          # 2. Macro Regime Classifier (Daily QQQ)
-          # ------------------------------------------------------------------
+          # -------------------------------------------------------------
+          # 2. Macro Regime (QQQ)
+          # -------------------------------------------------------------
           regime_name = "Regime 3: Rangebound Chop"
           regime_icon = "🟡"
           r_thb = 15000.0
@@ -108,9 +142,9 @@ jobs:
           except Exception as e:
               print(f"Macro error: {e}")
 
-          # ------------------------------------------------------------------
-          # 3. Watchpool DR Details & Conversion Ratios (SET Official)
-          # ------------------------------------------------------------------
+          # -------------------------------------------------------------
+          # 3. Watchpool DR Details (SET Ratios)
+          # -------------------------------------------------------------
           watchpool = [
               {"ticker": "NVDA", "dr": "NVDA80X", "ratio": 200},
               {"ticker": "PLTR", "dr": "PLTR01",  "ratio": 1100},
@@ -136,19 +170,16 @@ jobs:
                   curr_p = float(c[-1])
                   ema21 = float(pd.Series(c).ewm(span=21, adjust=False).mean().iloc[-1])
 
-                  # 3-Day RS vs QQQ
                   p_3d = float(c[-4]) if len(c) >= 4 else curr_p
                   stock_ret = ((curr_p - p_3d) / p_3d) * 100.0
                   rs_delta = stock_ret - qqq_3d_ret
 
-                  # Bollinger Band Width Compression (20, 2)
                   s_c = pd.Series(c)
                   sma20 = s_c.rolling(20).mean()
                   std20 = s_c.rolling(20).std()
                   bbw = ((sma20 + 2*std20) - (sma20 - 2*std20)) / sma20 * 100.0
                   is_compressed = bool(bbw.iloc[-1] <= bbw.tail(60).quantile(0.25))
 
-                  # 72-Hour Earnings Blackout Gate
                   imminent_earn = False
                   try:
                       cal = t_obj.calendar
@@ -187,9 +218,6 @@ jobs:
           candidates.sort(key=lambda x: x["rs"], reverse=True)
           top_picks = candidates[:2]
 
-          # ------------------------------------------------------------------
-          # 4. THB Conversion, Unit Calculation & Settrade Staging
-          # ------------------------------------------------------------------
           ticket_blocks = []
           settrade_copy_blocks = []
 
@@ -200,7 +228,6 @@ jobs:
                   stop_usd = p["stop_usd"]
                   ratio = p["ratio"]
 
-                  # Convert to THB per DR unit
                   entry_thb = (entry_usd * usd_thb) / ratio
                   stop_thb = (stop_usd * usd_thb) / ratio
                   risk_per_unit = entry_thb - stop_thb
@@ -208,11 +235,8 @@ jobs:
                   if risk_per_unit <= 0.001:
                       continue
 
-                  # Position Sizing
                   raw_units = int(r_thb / risk_per_unit)
                   raw_outlay = raw_units * entry_thb
-
-                  # 20% Vault B Cap (฿600,000 THB)
                   max_cap = 600000.0
                   if raw_outlay > max_cap:
                       units = int(max_cap / entry_thb)
@@ -221,7 +245,6 @@ jobs:
                       units = raw_units
                       capped_tag = ""
 
-                  # Tranche Targets in THB
                   target1_thb = entry_thb + (1.5 * risk_per_unit)
                   target2_thb = entry_thb + (3.0 * risk_per_unit)
                   t1_units = int(units * 0.60)
@@ -237,19 +260,19 @@ jobs:
                       ""
                   ])
 
-                  # Formatted copy-paste block for Settrade Streaming
                   settrade_copy_blocks.append(
                       f"<code>BUY {p['dr']} @ ฿{entry_thb:.2f} | Vol: {units:,} | Stop: ฿{stop_thb:.2f}</code>"
                   )
           else:
               ticket_blocks.append("📋 <b>EXECUTION:</b> Zero breakout setups qualified. Retain cash in MMF.")
 
-          # ------------------------------------------------------------------
-          # 5. Build and Send Telegram Message
-          # ------------------------------------------------------------------
-          lines = [
+          lines = []
+          if notice_header:
+              lines.append(notice_header)
+
+          lines.extend([
               "🇺🇸 <b>[C2C Engine E - Dual-Vault Briefing]</b>",
-              f"📅 <b>Time:</b> {bkk_time} BKK",
+              f"📅 <b>Time:</b> {bkk_time_str} BKK",
               f"💵 <b>USD/THB:</b> ฿{usd_thb:.2f}",
               "━━━━━━━━━━━━━━━━━━",
               f"📊 <b>MACRO REGIME:</b> {regime_icon} <b>{regime_name}</b>",
@@ -259,7 +282,7 @@ jobs:
               "🔍 <b>WATCHPOOL METRICS:</b>",
               "\n".join(summary_lines) if summary_lines else "• Data pending",
               "━━━━━━━━━━━━━━━━━━"
-          ]
+          ])
           lines.extend(ticket_blocks)
 
           if settrade_copy_blocks:
@@ -270,9 +293,7 @@ jobs:
           full_msg = "\n".join(lines)
 
           if token and chat_id:
-              url = f"https://api.telegram.org/bot{token}/sendMessage"
-              res = requests.post(url, json={"chat_id": chat_id, "text": full_msg, "parse_mode": "HTML"}, timeout=15)
+              res = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                                  json={"chat_id": chat_id, "text": full_msg, "parse_mode": "HTML"}, timeout=15)
               print(f"Telegram status: {res.status_code}")
-          else:
-              print("Missing Telegram credentials.")
           EOF
