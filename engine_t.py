@@ -118,7 +118,6 @@ if len(c_s50_d) >= 20:
     daily_bullish = s50_price >= s50_daily_ema20
     daily_bearish = s50_price < s50_daily_ema20
 
-# Intraday 15M MSS Trigger
 try:
     df_15m = yf.download("^SET50", period="5d", interval="15m", progress=False)
     if df_15m is not None and not df_15m.empty:
@@ -139,16 +138,11 @@ try:
 except Exception as e:
     print(f"15M Data Error: {e}")
 
-# Basis Clamping: Basis = Futures Price - Cash Index
-# Master Rule: Veto Long if Basis >= +5.5 pts; Veto Short if Basis <= -3.5 pts
-basis_delta = 0.0
-basis_pass_long = True
-basis_pass_short = True
+# Basis Clamping: Veto Long if Basis >= +5.5; Veto Short if Basis <= -3.5
+basis_delta = 0.5
 try:
-    # 0840.HK (Global X SET50 ETF proxy) provides real-time futures-aligned tracking
     c_fut_proxy = safe_get_series("0840.HK", "5d", "1d")
     if len(c_fut_proxy) >= 2:
-        # Normalized basis deviation against cash settlement
         basis_delta = float(c_fut_proxy[-1] - s50_price) if abs(c_fut_proxy[-1] - s50_price) < 25.0 else 0.5
 except Exception:
     basis_delta = 0.5
