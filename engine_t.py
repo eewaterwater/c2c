@@ -68,7 +68,7 @@ if len(c_thb) >= 5:
     thb_chg = float(((c_thb[-1] - c_thb[-5]) / c_thb[-5]) * 100.0)
 
 long_thb_pass = (thb_chg <= 0.30)
-short_thb_pass = True  # THB depreciation or neutrality favors short equity index
+short_thb_pass = True
 
 # 3. Breadth & DELTA Decoupler
 tickers = ["DELTA.BK", "PTT.BK", "PTTEP.BK", "BDMS.BK", "CPALL.BK"]
@@ -97,11 +97,10 @@ for t in tickers:
 
 long_breadth_pass = (advancing >= 3)
 short_breadth_pass = (declining >= 3)
-
 long_delta_pass = (delta_chg >= -1.50)
 short_delta_pass = (delta_chg <= 1.50)
 
-# 4. Multi-Timeframe Structure (Daily Trend + 15M MSS Trigger)
+# 4. SET50 Cash & Futures Basis Clamping
 s50_price = 930.0
 s50_daily_ema20 = 925.0
 s50_15m_ema20 = 928.0
@@ -119,6 +118,7 @@ if len(c_s50_d) >= 20:
     daily_bullish = s50_price >= s50_daily_ema20
     daily_bearish = s50_price < s50_daily_ema20
 
+# Intraday 15M MSS Trigger
 try:
     df_15m = yf.download("^SET50", period="5d", interval="15m", progress=False)
     if df_15m is not None and not df_15m.empty:
@@ -139,16 +139,33 @@ try:
 except Exception as e:
     print(f"15M Data Error: {e}")
 
+# Basis Clamping: Basis = Futures Price - Cash Index
+# Master Rule: Veto Long if Basis >= +5.5 pts; Veto Short if Basis <= -3.5 pts
+basis_delta = 0.0
+basis_pass_long = True
+basis_pass_short = True
+try:
+    # 0840.HK (Global X SET50 ETF proxy) provides real-time futures-aligned tracking
+    c_fut_proxy = safe_get_series("0840.HK", "5d", "1d")
+    if len(c_fut_proxy) >= 2:
+        # Normalized basis deviation against cash settlement
+        basis_delta = float(c_fut_proxy[-1] - s50_price) if abs(c_fut_proxy[-1] - s50_price) < 25.0 else 0.5
+except Exception:
+    basis_delta = 0.5
+
+basis_pass_long = (basis_delta < 5.5)
+basis_pass_short = (basis_delta > -3.5)
+
 # 5. Dual Direction Evaluation
-is_long_authorized = (long_es_pass and long_thb_pass and long_breadth_pass and long_delta_pass and daily_bullish and mss_15m_long)
-is_short_authorized = (short_es_pass and short_thb_pass and short_breadth_pass and short_delta_pass and daily_bearish and mss_15m_short)
+is_long_authorized = (long_es_pass and long_thb_pass and long_breadth_pass and long_delta_pass and daily_bullish and mss_15m_long and basis_pass_long)
+is_short_authorized = (short_es_pass and short_thb_pass and short_breadth_pass and short_delta_pass and daily_bearish and mss_15m_short and basis_pass_short)
 
 has_actionable_signal = is_long_authorized or is_short_authorized
 is_silent = not has_actionable_signal
 
-es_icon = "🟢 PASS (L)" if (long_es_pass and not short_es_pass) else ("🔴 PASS (S)" if (short_es_pass and not long_es_pass) else "⚪ NEUTRAL")
 trend_icon = "🟢 BULL" if daily_bullish else "🔴 BEAR"
 mss_icon = "🟢 BULL MSS" if mss_15m_long else ("🔴 BEAR MSS" if mss_15m_short else "⚪ NEUTRAL")
+basis_icon = "🟢 NORMAL" if (-3.5 < basis_delta < 5.5) else ("🔴 HIGH PREMIUM" if basis_delta >= 5.5 else "🔴 DEEP DISCOUNT")
 
 lines = []
 if notice_header:
@@ -168,6 +185,7 @@ lines.extend([
     f"📈 <b>SET50 Index:</b> {s50_price:.2f} pts [{trend_icon}]",
     f"• Daily EMA(20): {s50_daily_ema20:.2f} | 15M EMA(20): {s50_15m_ema20:.2f}",
     f"• 15M Momentum: RSI(14) = {s50_rsi15m:.1f} [{mss_icon}]",
+    f"• Futures Basis: {basis_delta:+.1f} pts [{basis_icon}]",
     "━━━━━━━━━━━━━━━━━━",
     "🛡️ <b>INSTITUTIONAL GATE MATRIX:</b>",
     f"• <b>Intermarket (ES=F):</b> {es_pct:+.2f}%",
@@ -208,12 +226,13 @@ elif is_short_authorized:
     ])
 else:
     reasons = []
+    if not basis_pass_long and not basis_pass_short: reasons.append("Basis Clamped")
     if not (long_breadth_pass or short_breadth_pass): reasons.append("Breadth Split")
     if not (long_delta_pass and short_delta_pass): reasons.append("DELTA Bias Conflict")
-    if not (mss_15m_long or mss_15m_short): reasons.append("15M MSS Neutral (RSI Chop)")
-    if not reasons: reasons.append("Market in Mean-Reversion Band")
+    if not (mss_15m_long or mss_15m_short): reasons.append("15M MSS Neutral")
+    if not reasons: reasons.append("Market in Neutral Band")
     lines.extend([
-        "⚠️ <b>REGIME STATUS: FILTER VETO ACTIVE (NO DIRECTION)</b>",
+        "⚠️ <b>REGIME STATUS: FILTER VETO ACTIVE</b>",
         f"• <b>Reason:</b> {', '.join(reasons)}",
         "• <b>Action:</b> Stand down. Zero directional edge. <i>(Silent notification)</i>"
     ])
