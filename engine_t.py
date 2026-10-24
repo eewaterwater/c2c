@@ -100,24 +100,44 @@ short_breadth_pass = (declining >= 3)
 long_delta_pass = (delta_chg >= -1.50)
 short_delta_pass = (delta_chg <= 1.50)
 
-# 4. SET50 Cash & Futures Basis Clamping
+# 4. SET50 Cash Structure, ATR, and 15M MSS Trigger
 s50_price = 930.0
 s50_daily_ema20 = 925.0
 s50_15m_ema20 = 928.0
 s50_rsi15m = 50.0
+s50_atr = 4.5
 daily_bullish = True
 daily_bearish = False
 mss_15m_long = False
 mss_15m_short = False
 
-c_s50_d = safe_get_series("^SET50", "3mo", "1d")
-if len(c_s50_d) >= 20:
-    s50_price = float(c_s50_d[-1])
-    s_ema_d = pd.Series(c_s50_d).ewm(span=20, adjust=False).mean()
-    s50_daily_ema20 = float(s_ema_d.iloc[-1])
-    daily_bullish = s50_price >= s50_daily_ema20
-    daily_bearish = s50_price < s50_daily_ema20
+# Daily Trend & 14-day ATR estimation
+try:
+    df_daily = yf.download("^SET50", period="3mo", interval="1d", progress=False)
+    if df_daily is not None and not df_daily.empty:
+        c_s50_d = df_daily["Close"].iloc[:, 0].dropna() if isinstance(df_daily.columns, pd.MultiIndex) else df_daily["Close"].dropna()
+        h_s50_d = df_daily["High"].iloc[:, 0].dropna() if isinstance(df_daily.columns, pd.MultiIndex) else df_daily["High"].dropna()
+        l_s50_d = df_daily["Low"].iloc[:, 0].dropna() if isinstance(df_daily.columns, pd.MultiIndex) else df_daily["Low"].dropna()
+        
+        if len(c_s50_d) >= 20:
+            s50_price = float(c_s50_d.iloc[-1])
+            s_ema_d = c_s50_d.ewm(span=20, adjust=False).mean()
+            s50_daily_ema20 = float(s_ema_d.iloc[-1])
+            daily_bullish = s50_price >= s50_daily_ema20
+            daily_bearish = s50_price < s50_daily_ema20
+            
+            # ATR (14)
+            tr1 = h_s50_d - l_s50_d
+            tr2 = (h_s50_d - c_s50_d.shift(1)).abs()
+            tr3 = (l_s50_d - c_s50_d.shift(1)).abs()
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            atr_series = tr.rolling(14).mean()
+            if not atr_series.dropna().empty:
+                s50_atr = max(float(atr_series.iloc[-1]), 3.5)
+except Exception as e:
+    print(f"Daily/ATR Data Error: {e}")
 
+# Intraday 15M MSS Trigger
 try:
     df_15m = yf.download("^SET50", period="5d", interval="15m", progress=False)
     if df_15m is not None and not df_15m.empty:
@@ -138,7 +158,7 @@ try:
 except Exception as e:
     print(f"15M Data Error: {e}")
 
-# Basis Clamping: Veto Long if Basis >= +5.5; Veto Short if Basis <= -3.5
+# Basis Clamping: Basis = Futures Price - Cash Index
 basis_delta = 0.5
 try:
     c_fut_proxy = safe_get_series("0840.HK", "5d", "1d")
@@ -179,7 +199,7 @@ lines.extend([
     f"📈 <b>SET50 Index:</b> {s50_price:.2f} pts [{trend_icon}]",
     f"• Daily EMA(20): {s50_daily_ema20:.2f} | 15M EMA(20): {s50_15m_ema20:.2f}",
     f"• 15M Momentum: RSI(14) = {s50_rsi15m:.1f} [{mss_icon}]",
-    f"• Futures Basis: {basis_delta:+.1f} pts [{basis_icon}]",
+    f"• Futures Basis: {basis_delta:+.1f} pts [{basis_icon}] | ATR(14): {s50_atr:.1f} pts",
     "━━━━━━━━━━━━━━━━━━",
     "🛡️ <b>INSTITUTIONAL GATE MATRIX:</b>",
     f"• <b>Intermarket (ES=F):</b> {es_pct:+.2f}%",
@@ -190,71 +210,6 @@ lines.extend([
     "━━━━━━━━━━━━━━━━━━"
 ])
 
-if is_long_authorized:
-    lines.extend([
-        "🎯 <b>REGIME STATUS: GREEN (LONG AUTHORIZED)</b>",
-        "📋 <b>INSTITUTIONAL LONG BRACKET:</b>",
-        f"• Order: <b>BUY OPEN 10 Contracts</b> (฿1.0M Baseline)",
-        f"• Limit Entry: <b>{s50_price:.1f}</b>",
-        f"• Hard Stop: <b>{s50_price - 4.5:.1f}</b> (-4.5 pts cap)",
-        f"• <b>T1 (Bank 4 cts):</b> <b>{s50_price + 4.5:.1f}</b> (+4.5 pts &gt;&gt; Move stop to BE)",
-        f"• <b>T2A (Fixed 3 cts):</b> <b>{s50_price + 12.0:.1f}</b> (+12.0 pts)",
-        f"• <b>T2B (Runner 3 cts):</b> Trail 2H High - 6.0 pts",
-        "━━━━━━━━━━━━━━━━━━",
-        "📲 <b>QUICK ORDER:</b>",
-        f"<code>BUY OPEN S50 10 cts @ {s50_price:.1f} | Stop: {s50_price - 4.5:.1f}</code>"
-    ])
-elif is_short_authorized:
-    lines.extend([
-        "🎯 <b>REGIME STATUS: RED (SHORT AUTHORIZED)</b>",
-        "📋 <b>INSTITUTIONAL SHORT BRACKET:</b>",
-        f"• Order: <b>SELL OPEN (SHORT) 10 Contracts</b> (฿1.0M Baseline)",
-        f"• Limit Entry: <b>{s50_price:.1f}</b>",
-        f"• Hard Stop: <b>{s50_price + 4.5:.1f}</b> (+4.5 pts cap)",
-        f"• <b>T1 (Bank 4 cts):</b> <b>{s50_price - 4.5:.1f}</b> (-4.5 pts &gt;&gt; Move stop to BE)",
-        f"• <b>T2A (Fixed 3 cts):</b> <b>{s50_price - 12.0:.1f}</b> (-12.0 pts)",
-        f"• <b>T2B (Runner 3 cts):</b> Trail 2H Low + 6.0 pts",
-        "━━━━━━━━━━━━━━━━━━",
-        "📲 <b>QUICK ORDER:</b>",
-        f"<code>SELL OPEN S50 10 cts @ {s50_price:.1f} | Stop: {s50_price + 4.5:.1f}</code>"
-    ])
-else:
-    reasons = []
-    if not basis_pass_long and not basis_pass_short: reasons.append("Basis Clamped")
-    if not (long_breadth_pass or short_breadth_pass): reasons.append("Breadth Split")
-    if not (long_delta_pass and short_delta_pass): reasons.append("DELTA Bias Conflict")
-    if not (mss_15m_long or mss_15m_short): reasons.append("15M MSS Neutral")
-    if not reasons: reasons.append("Market in Neutral Band")
-    lines.extend([
-        "⚠️ <b>REGIME STATUS: FILTER VETO ACTIVE</b>",
-        f"• <b>Reason:</b> {', '.join(reasons)}",
-        "• <b>Action:</b> Stand down. Zero directional edge. <i>(Silent notification)</i>"
-    ])
-
-lines.append("━━━━━━━━━━━━━━━━━━\n<i>Automated pipeline running via GitHub Cloud.</i>")
-full_msg = "\n".join(lines)
-
-keyboard = {
-    "inline_keyboard": [
-        [
-            {"text": "📈 S50 Futures Chart", "url": "https://www.tradingview.com/chart/?symbol=TFEX%3AS501!"},
-            {"text": "📲 Open InnovestX", "url": "https://play.google.com/store/apps/details?id=com.scbs.easyinvest"}
-        ]
-    ]
-}
-
-if token and chat_id:
-    res = requests.post(
-        f"https://api.telegram.org/bot{token}/sendMessage",
-        json={
-            "chat_id": chat_id,
-            "text": full_msg,
-            "parse_mode": "HTML",
-            "disable_notification": is_silent,
-            "reply_markup": keyboard
-        },
-        timeout=15
-    )
-    print(f"Telegram status: {res.status_code}")
-else:
-    print("Missing Telegram credentials.")
+# Master Playbook Fine-Tuned Targets & Dynamic Chandelier ATR
+long_t1 = round(s50_price + 5.5, 1)          # Longs bank at +5.5 to +6.0 pts
+short_t1 = round(s50_price - 4.5,
