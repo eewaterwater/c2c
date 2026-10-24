@@ -52,7 +52,6 @@ jobs:
           xbkk = xcals.get_calendar("XBKK")
           is_market_open_today = xbkk.is_session(bkk_date_str)
 
-          # Holiday: Silent stand-down notification
           if not is_market_open_today and event_name == "schedule":
               msg = (
                   f"⏸️ <b>[C2C Engine T - Market Closed]</b>\n"
@@ -152,10 +151,6 @@ jobs:
               daily_bullish = s50_price >= s50_ema20
 
           all_pass = (not es_veto) and (not thb_veto) and breadth_pass and (not delta_veto) and daily_bullish
-
-          # Sound triage rule:
-          # If all gates pass -> Loud Alert (disable_notification = False)
-          # If vetoed -> Silent Delivery (disable_notification = True)
           is_silent = not all_pass
 
           es_icon = "🔴 VETO" if es_veto else "🟢 PASS"
@@ -212,6 +207,18 @@ jobs:
           lines.append("━━━━━━━━━━━━━━━━━━\n<i>Automated pipeline running via GitHub Cloud.</i>")
           full_msg = "\n".join(lines)
 
+          # -------------------------------------------------------------
+          # Telegram Inline Keyboard (1-Tap Deep Links)
+          # -------------------------------------------------------------
+          keyboard = {
+              "inline_keyboard": [
+                  [
+                      {"text": "📲 Open Streaming", "url": "https://www.settrade.com"},
+                      {"text": "📈 S50 Chart", "url": "https://www.tradingview.com/chart/?symbol=TFEX%3AS501!"}
+                  ]
+              ]
+          }
+
           if token and chat_id:
               res = requests.post(
                   f"https://api.telegram.org/bot{token}/sendMessage",
@@ -219,9 +226,10 @@ jobs:
                       "chat_id": chat_id,
                       "text": full_msg,
                       "parse_mode": "HTML",
-                      "disable_notification": is_silent
+                      "disable_notification": is_silent,
+                      "reply_markup": keyboard
                   },
                   timeout=15
               )
-              print(f"Telegram status: {res.status_code} | Silent Mode: {is_silent}")
+              print(f"Telegram status: {res.status_code}")
           EOF
