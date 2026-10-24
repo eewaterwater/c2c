@@ -119,7 +119,7 @@ try:
 except Exception as e:
     print(f"FX Error: {e}")
 
-# 4. Macro Regime
+# 4. Macro Regime Classifier
 regime_name = "Regime 3: Rangebound Chop"
 regime_icon = "🟡"
 r_thb = 15000.0
@@ -290,7 +290,6 @@ if top_picks and risk_authorized and r_thb > 0:
             capped_tag = ""
 
         target1_thb = entry_thb + (1.5 * risk_per_unit)
-        target2_thb = entry_thb + (3.0 * risk_per_unit)
         t1_units = int(units * 0.60)
         t2_units = units - t1_units
 
@@ -299,8 +298,8 @@ if top_picks and risk_authorized and r_thb > 0:
             f"  • Entry: <b>฿{entry_thb:.2f}</b> (${entry_usd:.2f})",
             f"  • Hard Stop: <b>฿{stop_thb:.2f}</b> (-2.5%)",
             f"  • Sizing: <b>{units:,} units</b> (Outlay: ฿{units*entry_thb:,.0f} THB){capped_tag}",
-            f"  • <b>T1 (Bank 60% / {t1_units:,} u):</b> Limit <b>฿{target1_thb:.2f}</b> (+1.5R &gt;&gt; Stop to BE)",
-            f"  • <b>T2 (Runner 40% / {t2_units:,} u):</b> Limit <b>฿{target2_thb:.2f}</b> (+3.0R)",
+            f"  • <b>T1 (Bank 60% / {t1_units:,} u):</b> Limit <b>฿{target1_thb:.2f}</b> (+1.5R &gt;&gt; Move stop to BE)",
+            f"  • <b>T2 (Runner 40% / {t2_units:,} u):</b> Dynamic Trail &gt;&gt; Hold while Daily Close &ge; 21 EMA",
             ""
         ])
 
@@ -345,7 +344,7 @@ full_msg = "\n".join(lines)
 # Direct TradingView Charts + InnovestX
 keyboard_buttons = [
     [
-        {"text": "📲 Open InnovestX", "url": "https://market.android.com/details?id=com.scb.easyinvest"}
+        {"text": "📲 Open InnovestX", "url": "https://play.google.com/store/apps/details?id=com.scbs.easyinvest"}
     ]
 ]
 
