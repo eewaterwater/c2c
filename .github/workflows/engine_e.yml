@@ -2,7 +2,6 @@ name: C2C Engine E (Equities & US DR Scanner)
 
 on:
   schedule:
-    # 13:00 UTC = 20:00 Bangkok Time (Mon-Fri pre-US cash open)
     - cron: '0 13 * * 1-5'
   workflow_dispatch:
     inputs:
@@ -39,192 +38,17 @@ jobs:
           pip install --upgrade pip
           pip install requests yfinance pandas numpy pytz exchange_calendars
 
-      - name: Run Macro Classifier, State Engine & DR Scanner
+      - name: Run Engine E Script
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           EVENT_NAME: ${{ github.event_name }}
           INPUT_OUTCOME: ${{ github.event.inputs.trade_outcome }}
+        run: python engine_e.py
+
+      - name: Commit Updated State
         run: |
-          python - << 'EOF'
-          import os
-          import sys
-          import json
-          import requests
-          from datetime import datetime
-          import pytz
-          import pandas as pd
-          import numpy as np
-
-          token = os.environ.get("TELEGRAM_BOT_TOKEN")
-          chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-          event_name = os.environ.get("EVENT_NAME", "workflow_dispatch")
-          trade_outcome = os.environ.get("INPUT_OUTCOME", "none")
-
-          bkk_now = datetime.now(pytz.timezone("Asia/Bangkok"))
-          ny_now = datetime.now(pytz.timezone("America/New_York"))
-          ny_date_str = ny_now.strftime("%Y-%m-%d")
-          bkk_time_str = bkk_now.strftime("%Y-%m-%d %H:%M:%S")
-
-          # -------------------------------------------------------------
-          # 1. State Maintenance
-          # -------------------------------------------------------------
-          state_path = "state.json"
-          state = {
-              "consecutive_wins": 0,
-              "daily_stopouts": 0,
-              "weekly_stopouts": 0,
-              "last_trade_date": ny_date_str,
-              "active_position": None
-          }
-          if os.path.exists(state_path):
-              try:
-                  with open(state_path, "r") as f:
-                      state = json.load(f)
-              except Exception as e:
-                  print(f"Warning reading state.json: {e}")
-
-          if state.get("last_trade_date") != ny_date_str:
-              state["daily_stopouts"] = 0
-              state["last_trade_date"] = ny_date_str
-
-          if trade_outcome == "win":
-              state["consecutive_wins"] = state.get("consecutive_wins", 0) + 1
-              state["daily_stopouts"] = 0
-          elif trade_outcome == "stopout":
-              state["consecutive_wins"] = 0
-              state["daily_stopouts"] = state.get("daily_stopouts", 0) + 1
-              state["weekly_stopouts"] = state.get("weekly_stopouts", 0) + 1
-          elif trade_outcome == "reset":
-              state["consecutive_wins"] = 0
-              state["daily_stopouts"] = 0
-              state["weekly_stopouts"] = 0
-
-          try:
-              with open(state_path, "w") as f:
-                  json.dump(state, f, indent=2)
-          except Exception as e:
-              print(f"Warning saving state.json: {e}")
-
-          circuit_breaker_active = False
-          circuit_reason = ""
-          if state.get("daily_stopouts", 0) >= 2:
-              circuit_breaker_active = True
-              circuit_reason = "Daily Stop-Out Limit Reached (2 stops)"
-          elif state.get("weekly_stopouts", 0) >= 3:
-              circuit_breaker_active = True
-              circuit_reason = "Weekly Stop-Out Limit Reached (3 stops in rolling week)"
-
-          win_streak = state.get("consecutive_wins", 0)
-          streak_boost = win_streak >= 3
-
-          # -------------------------------------------------------------
-          # 2. Market Calendar Check
-          # -------------------------------------------------------------
-          is_us_open_today = True
-          try:
-              import exchange_calendars as xcals
-              xnys = xcals.get_calendar("XNYS")
-              is_us_open_today = bool(xnys.is_session(pd.Timestamp(ny_date_str)))
-          except Exception as e:
-              print(f"Calendar check fallback: {e}")
-              is_us_open_today = ny_now.weekday() < 5
-
-          if not is_us_open_today and event_name == "schedule":
-              msg = (
-                  f"⏸️ <b>[C2C Engine E - US Markets Closed]</b>\n"
-                  f"📅 <b>Date:</b> {ny_date_str} (US)\n"
-                  f"━━━━━━━━━━━━━━━━━━\n"
-                  f"• <b>Status:</b> NYSE / NASDAQ is closed today (Holiday/Weekend).\n"
-                  f"• <b>Action:</b> Standing down. No US DR scan executed.\n"
-                  f"━━━━━━━━━━━━━━━━━━\n"
-                  f"<i>Automated pipeline running via GitHub Cloud.</i>"
-              )
-              if token and chat_id:
-                  requests.post(
-                      f"https://api.telegram.org/bot{token}/sendMessage",
-                      json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML", "disable_notification": True},
-                      timeout=15
-                  )
-              sys.exit(0)
-
-          notice_header = ""
-          if not is_us_open_today:
-              notice_header = "⚠️ <b>[TEST MODE: US Market Closed Today - Using Prior Close]</b>\n"
-
-          # -------------------------------------------------------------
-          # 3. Safe yfinance Helpers
-          # -------------------------------------------------------------
-          import yfinance as yf
-
-          def safe_series(df):
-              if df is None or df.empty:
-                  return np.array([])
-              try:
-                  if isinstance(df.columns, pd.MultiIndex):
-                      return df["Close"].iloc[:, 0].dropna().values
-                  return df["Close"].dropna().values
-              except Exception:
-                  return np.array([])
-
-          usd_thb = 35.0
-          try:
-              thb_df = yf.download("THB=X", period="5d", interval="1d", progress=False)
-              c_thb = safe_series(thb_df)
-              if len(c_thb) > 0:
-                  usd_thb = float(c_thb[-1])
-          except Exception as e:
-              print(f"FX Error: {e}")
-
-          # -------------------------------------------------------------
-          # 4. Macro Regime Classifier
-          # -------------------------------------------------------------
-          regime_name = "Regime 3: Rangebound Chop"
-          regime_icon = "🟡"
-          r_thb = 15000.0
-          r_label = "0.50R (฿15,000 THB)"
-          vault_a_alloc = "35% QQQ / 25% SMH / 40% SGOV"
-          risk_authorized = not circuit_breaker_active
-          qqq_3d_ret = 0.0
-
-          try:
-              qqq_df = yf.download("QQQ", period="1y", interval="1d", progress=False)
-              c_qqq = safe_series(qqq_df)
-              if len(c_qqq) >= 200:
-                  p_now = float(c_qqq[-1])
-                  p_ema20 = float(pd.Series(c_qqq).ewm(span=20, adjust=False).mean().iloc[-1])
-                  p_ema50 = float(pd.Series(c_qqq).ewm(span=50, adjust=False).mean().iloc[-1])
-                  p_sma200 = float(pd.Series(c_qqq).rolling(200).mean().iloc[-1])
-
-                  if len(c_qqq) >= 4:
-                      qqq_3d_ret = ((p_now - c_qqq[-4]) / c_qqq[-4]) * 100.0
-
-                  if p_now < p_sma200 * 0.985:
-                      regime_name = "Regime 4: Structural Bear"
-                      regime_icon = "🔴"
-                      r_thb = 0.0
-                      r_label = "0.0R (100% Cash Gate)"
-                      vault_a_alloc = "100% SGOV (0% Equities)"
-                      risk_authorized = False
-                  elif p_now > p_ema20 > p_ema50 > p_sma200:
-                      regime_name = "Regime 1: Confirmed Bull"
-                      regime_icon = "🟢"
-                      if streak_boost:
-                          r_thb = 45000.0
-                          r_label = f"1.50R (฿45,000 THB) 🔥 [Streak: {win_streak}W]"
-                      else:
-                          r_thb = 30000.0
-                          r_label = "1.00R (฿30,000 THB)"
-                      vault_a_alloc = "55% QQQ / 35% SMH / 10% SGOV"
-                  elif p_now < p_ema20 and p_now > p_sma200:
-                      regime_name = "Regime 2: Bull Pullback"
-                      regime_icon = "🟠"
-                      r_thb = 22500.0
-                      r_label = "0.75R (฿22,500 THB)"
-                      vault_a_alloc = "35% QQQ / 25% SMH / 40% SGOV"
-                  else:
-                      regime_name = "Regime 3: Rangebound Chop"
-                      regime_icon = "🟡"
-                      r_thb = 15000.0
-                      r_label = "0.50R (฿15,000 THB)"
-                      vault_a_alloc = "35% Q
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          git diff --quiet && git diff --staged --quiet || (git commit -m "chore(state): update trade engine state [skip ci]" && git push origin HEAD:main) || true
