@@ -1,0 +1,160 @@
+name: C2C Engine E (Equities & US DR Scanner)
+
+on:
+  schedule:
+    # 13:00 UTC = 20:00 Bangkok Time (Mon-Fri pre-US cash open)
+    - cron: '0 13 * * 1-5'
+  workflow_dispatch: # Allows manual trigger anytime from Actions tab
+
+jobs:
+  scan-equities:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install requests yfinance pandas pytz
+
+      - name: Run Macro Classifier & DR Scanner
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - << 'EOF'
+          import os
+          import requests
+          from datetime import datetime
+          import pytz
+          import yfinance as yf
+          import pandas as pd
+
+          token = os.environ.get("TELEGRAM_BOT_TOKEN")
+          chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+          bkk_time = datetime.now(pytz.timezone("Asia/Bangkok")).strftime("%Y-%m-%d %H:%M:%S")
+
+          # ------------------------------------------------------------------
+          # 1. Macro Regime Classifier (QQQ & SPY Daily Indicators)
+          # ------------------------------------------------------------------
+          regime_name = "Regime 3: Rangebound Chop"
+          regime_icon = "🟡"
+          vault_a_alloc = "35% QQQ / 25% SMH / 40% SGOV"
+          risk_unit = "0.50R (฿15,000 THB)"
+          playbook_note = "Capital Preservation (Max 1 scout setup or cash)"
+          
+          qqq_price = 0.0
+          qqq_ema20 = 0.0
+          qqq_ema50 = 0.0
+          qqq_sma200 = 0.0
+
+          try:
+              qqq_df = yf.download("QQQ", period="1y", interval="1d", progress=False)
+              if len(qqq_df) >= 200:
+                  close = qqq_df["Close"].squeeze()
+                  ema20 = close.ewm(span=20, adjust=False).mean()
+                  ema50 = close.ewm(span=50, adjust=False).mean()
+                  sma200 = close.rolling(window=200).mean()
+
+                  qqq_price = float(close.iloc[-1])
+                  qqq_ema20 = float(ema20.iloc[-1])
+                  qqq_ema50 = float(ema50.iloc[-1])
+                  qqq_sma200 = float(sma200.iloc[-1])
+
+                  # Hierarchical 4-Regime Classification
+                  if qqq_price < qqq_sma200 * 0.985:
+                      regime_name = "Regime 4: Structural Bear"
+                      regime_icon = "🔴"
+                      vault_a_alloc = "100% SGOV (0% Equities)"
+                      risk_unit = "0.0R (No Trades Authorized)"
+                      playbook_note = "100% Hard Cash Gate. All capital in SCBMONEY/MMF."
+                  elif qqq_price > qqq_ema20 > qqq_ema50 > qqq_sma200:
+                      regime_name = "Regime 1: Confirmed Bull (Stage-2)"
+                      regime_icon = "🟢"
+                      vault_a_alloc = "55% QQQ / 35% SMH / 10% SGOV"
+                      risk_unit = "1.0R (฿30,000 THB)"
+                      playbook_note = "Full Risk-On: VCP Breakouts & 21 EMA Pullbacks"
+                  elif qqq_price < qqq_ema20 and qqq_price > qqq_sma200:
+                      regime_name = "Regime 2: Bull Market Pullback"
+                      regime_icon = "🟠"
+                      vault_a_alloc = "35% QQQ / 25% SMH / 40% SGOV"
+                      risk_unit = "0.75R (฿22,500 THB)"
+                      playbook_note = "Dip Snatching: 50 EMA Reversals. No breakout chasing."
+                  else:
+                      regime_name = "Regime 3: Rangebound Chop"
+                      regime_icon = "🟡"
+                      vault_a_alloc = "35% QQQ / 25% SMH / 40% SGOV"
+                      risk_unit = "0.50R (฿15,000 THB)"
+                      playbook_note = "Stand Aside / Max 1 high-conviction scout setup."
+          except Exception as e:
+              print(f"Error computing Macro Regime: {e}")
+
+          # ------------------------------------------------------------------
+          # 2. Watchlist Compression Scan (High-Beta US Leaders / DR Universe)
+          # ------------------------------------------------------------------
+          watchlist = ["NVDA", "PLTR", "TSLA", "AMD", "SOXX"]
+          dr_map = {
+              "NVDA": "NVDA80X",
+              "PLTR": "PLTR01",
+              "TSLA": "TSLA80X",
+              "AMD": "AMD80X",
+              "SOXX": "SOXX23"
+          }
+
+          scan_lines = []
+          try:
+              data = yf.download(watchlist, period="3mo", interval="1d", progress=False)
+              for ticker in watchlist:
+                  try:
+                      t_close = data["Close"][ticker].dropna()
+                      curr_px = float(t_close.iloc[-1])
+                      ema21 = float(t_close.ewm(span=21, adjust=False).mean().iloc[-1])
+                      dist_21 = ((curr_px - ema21) / ema21) * 100.0
+                      dr_symbol = dr_map.get(ticker, ticker)
+
+                      if curr_px >= ema21 and dist_21 <= 3.5:
+                          status = f"⚡ <b>{dr_symbol}</b> ({ticker}): ${curr_px:.2f} (Near 21 EMA: {dist_21:+.1f}%)"
+                      elif curr_px < ema21:
+                          status = f"💤 <b>{dr_symbol}</b> ({ticker}): ${curr_px:.2f} (Below 21 EMA: {dist_21:+.1f}%)"
+                      else:
+                          status = f"📈 <b>{dr_symbol}</b> ({ticker}): ${curr_px:.2f} (+{dist_21:.1f}% extended)"
+                      scan_lines.append(status)
+                  except Exception as e:
+                      scan_lines.append(f"⚪ {ticker}: Data unavailable")
+          except Exception as e:
+              print(f"Error fetching watchlist: {e}")
+
+          # ------------------------------------------------------------------
+          # 3. Assemble Telegram Alert
+          # ------------------------------------------------------------------
+          msg_blocks = [
+              "🇺🇸 <b>[C2C Engine E - Dual-Vault Briefing]</b>",
+              f"📅 <b>Time:</b> {bkk_time} BKK",
+              "━━━━━━━━━━━━━━━━━━",
+              f"📊 <b>MACRO CLASSIFIER:</b> {regime_icon} <b>{regime_name}</b>",
+              f"• <b>QQQ Spot:</b> ${qqq_price:.2f} | 200 SMA: ${qqq_sma200:.2f}",
+              f"• <b>Tonight's Policy:</b> {playbook_note}",
+              "━━━━━━━━━━━━━━━━━━",
+              "🏦 <b>VAULT TARGET ALLOCATION:</b>",
+              f"• <b>Vault A (฿2.0M USD Anchor):</b>\n  <code>{vault_a_alloc}</code>",
+              f"• <b>Vault B (฿3.0M DR Line):</b>\n  Authorized Risk Unit: <b>{risk_unit}</b>",
+              f"  Single Position Cap: <b>฿600,000 THB (20%)</b>",
+              "━━━━━━━━━━━━━━━━━━",
+              "🎯 <b>DR WATCHLIST (21-EMA Proximity):</b>",
+              "\n".join(scan_lines),
+              "━━━━━━━━━━━━━━━━━━",
+              "<i>Automated pipeline running via GitHub Cloud.</i>"
+          ]
+
+          full_msg = "\n".join(msg_blocks)
+
+          if token and chat_id:
+              url = f"https://api.telegram.org/bot{token}/sendMessage"
+              res = requests.post(url, json={"chat_id": chat_id, "text": full_msg, "parse_mode": "HTML"}, timeout=15)
+              print(f"Telegram status: {res.status_code}")
+          else:
+              print("Missing Telegram credentials.")
+          EOF
