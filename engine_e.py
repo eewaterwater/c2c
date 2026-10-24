@@ -338,7 +338,7 @@ full_msg = "\n".join(lines)
 # Direct TradingView Charts + InnovestX
 keyboard_buttons = [
     [
-        {"text": "📲 Open InnovestX", "url": "https://play.google.com/store/apps/details?id=com.scb.easyinvest"}
+        {"text": "📲 Open InnovestX", "url": "https://market.android.com/details?id=com.scb.easyinvest"}
     ]
 ]
 
