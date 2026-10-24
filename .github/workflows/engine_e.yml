@@ -66,7 +66,7 @@ jobs:
           bkk_time_str = bkk_now.strftime("%Y-%m-%d %H:%M:%S")
 
           # -------------------------------------------------------------
-          # 1. State Ingestion & Maintenance
+          # 1. State Maintenance
           # -------------------------------------------------------------
           state_path = "state.json"
           state = {
@@ -352,8 +352,6 @@ jobs:
           else:
               ticket_blocks.append("📋 <b>EXECUTION:</b> Zero breakout setups qualified. Retain cash in MMF. <i>(Silent notification)</i>")
 
-          # Sound triage rule:
-          # Only ring if there is an active trade setup. Otherwise, silent delivery.
           is_silent = not has_executable_trade
 
           lines = []
@@ -384,6 +382,26 @@ jobs:
           lines.append("━━━━━━━━━━━━━━━━━━\n<i>Automated pipeline running via GitHub Cloud.</i>")
           full_msg = "\n".join(lines)
 
+          # -------------------------------------------------------------
+          # Telegram Inline Keyboard (Context-Aware Deep Links)
+          # -------------------------------------------------------------
+          top_chart_sym = top_picks[0]["ticker"] if top_picks else "QQQ"
+          keyboard_buttons = [
+              [
+                  {"text": "📲 Open Streaming", "url": "https://www.settrade.com"},
+                  {"text": f"📈 {top_chart_sym} Chart", "url": f"https://www.tradingview.com/chart/?symbol={top_chart_sym}"}
+              ]
+          ]
+
+          # If multiple picks, add a second row button for pick #2
+          if len(top_picks) > 1:
+              p2_sym = top_picks[1]["ticker"]
+              keyboard_buttons.append([
+                  {"text": f"📈 {p2_sym} Chart", "url": f"https://www.tradingview.com/chart/?symbol={p2_sym}"}
+              ])
+
+          keyboard = {"inline_keyboard": keyboard_buttons}
+
           if token and chat_id:
               res = requests.post(
                   f"https://api.telegram.org/bot{token}/sendMessage",
@@ -391,11 +409,12 @@ jobs:
                       "chat_id": chat_id,
                       "text": full_msg,
                       "parse_mode": "HTML",
-                      "disable_notification": is_silent
+                      "disable_notification": is_silent,
+                      "reply_markup": keyboard
                   },
                   timeout=15
               )
-              print(f"Telegram status: {res.status_code} | Silent Mode: {is_silent}")
+              print(f"Telegram status: {res.status_code}")
           EOF
 
       - name: Commit Updated State
