@@ -17,6 +17,7 @@ bkk_now = datetime.now(pytz.timezone("Asia/Bangkok"))
 ny_now = datetime.now(pytz.timezone("America/New_York"))
 ny_date_str = ny_now.strftime("%Y-%m-%d")
 bkk_time_str = bkk_now.strftime("%Y-%m-%d %H:%M:%S")
+is_friday = (bkk_now.weekday() == 4)
 
 # 1. State Maintenance (With Fallback Resilience)
 state_path = "state.json"
@@ -114,13 +115,25 @@ def safe_series(df, col="Close"):
 usd_thb = 35.0
 try:
     thb_df = yf.download("THB=X", period="5d", interval="1d", progress=False)
-    c_thb = safe_series(thb_df)
+    c_thb = safe_series(thb_df, "Close")
     if len(c_thb) > 0:
         usd_thb = float(c_thb[-1])
 except Exception as e:
     print(f"FX Error: {e}")
 
-# 4. Hierarchical 4-Regime Classifier (QQQ Multi-Timeframe)
+# 4. VIX Volatility Gate
+vix_val = 18.0
+try:
+    vix_df = yf.download("^VIX", period="5d", interval="1d", progress=False)
+    c_vix = safe_series(vix_df, "Close")
+    if len(c_vix) > 0:
+        vix_val = float(c_vix[-1])
+except Exception as e:
+    print(f"VIX Error: {e}")
+
+vix_elevated = vix_val > 28.0
+
+# 5. Hierarchical 4-Regime Classifier (QQQ Multi-Timeframe)
 regime_name = "Regime 3: Rangebound Chop"
 regime_icon = "🟡"
 r_thb = 15000.0
@@ -143,7 +156,6 @@ try:
         if len(c_qqq) >= 4:
             qqq_3d_ret = ((p_now - c_qqq[-4]) / c_qqq[-4]) * 100.0
 
-        # Regime 4 requires 3 consecutive daily closes < 200 SMA by >= 1.5%
         is_bear_confirmed = False
         if len(c_qqq) >= 3 and len(sma200_series) >= 3:
             recent_closes = c_qqq[-3:]
@@ -160,9 +172,12 @@ try:
         elif p_now > p_ema20 > p_ema50 > p_sma200:
             regime_name = "Regime 1: Confirmed Bull"
             regime_icon = "🟢"
-            if streak_boost:
+            if streak_boost and not vix_elevated:
                 r_thb = 45000.0
                 r_label = f"1.50R (฿45,000 THB) 🔥 [Streak: {win_streak}W]"
+            elif vix_elevated:
+                r_thb = 15000.0
+                r_label = f"0.50R (฿15,000 THB) [VIX Spike Dampener ({vix_val:.1f})]"
             else:
                 r_thb = 30000.0
                 r_label = "1.00R (฿30,000 THB)"
@@ -170,8 +185,8 @@ try:
         elif p_now < p_ema20 and p_now > p_sma200:
             regime_name = "Regime 2: Bull Pullback"
             regime_icon = "🟠"
-            r_thb = 22500.0
-            r_label = "0.75R (฿22,500 THB)"
+            r_thb = 15000.0 if vix_elevated else 22500.0
+            r_label = "0.50R (฿15,000 THB) [VIX High]" if vix_elevated else "0.75R (฿22,500 THB)"
             vault_a_alloc = "35% QQQ / 25% SMH / 40% SGOV"
         else:
             regime_name = "Regime 3: Rangebound Chop"
@@ -187,20 +202,24 @@ if circuit_breaker_active:
     r_label = f"0.0R (HALTED: {circuit_reason})"
     risk_authorized = False
 
-# 5. Core Watchpool (High-Beta Momentum & Mega-Cap Tech)
+# 6. Core Watchpool (Expanded 16 High-Beta & Mega-Cap Leaders)
 watchpool = [
-    {"ticker": "NVDA",  "dr": "NVDA80X", "ratio": 200,  "exchange": "NASDAQ"},
-    {"ticker": "PLTR",  "dr": "PLTR01",  "ratio": 1100, "exchange": "NASDAQ"},
-    {"ticker": "TSLA",  "dr": "TSLA80X", "ratio": 5000, "exchange": "NASDAQ"},
-    {"ticker": "AMD",   "dr": "AMD80X",  "ratio": 5000, "exchange": "NASDAQ"},
-    {"ticker": "AAPL",  "dr": "AAPL80X", "ratio": 1000, "exchange": "NASDAQ"},
-    {"ticker": "MSFT",  "dr": "MSFT80X", "ratio": 1000, "exchange": "NASDAQ"},
-    {"ticker": "GOOGL", "dr": "GOOG80X", "ratio": 500,  "exchange": "NASDAQ"},
-    {"ticker": "META",  "dr": "META80X", "ratio": 1000, "exchange": "NASDAQ"},
-    {"ticker": "AMZN",  "dr": "AMZN80X", "ratio": 500,  "exchange": "NASDAQ"},
-    {"ticker": "LLY",   "dr": "LLY80X",  "ratio": 1000, "exchange": "NYSE"},
-    {"ticker": "ISRG",  "dr": "ISRG80X", "ratio": 500,  "exchange": "NASDAQ"},
-    {"ticker": "SOXX",  "dr": "SOXX23",  "ratio": 100,  "exchange": "NASDAQ"}
+    {"ticker": "NVDA",  "dr": "NVDA80X",   "ratio": 200,  "exchange": "NASDAQ"},
+    {"ticker": "PLTR",  "dr": "PLTR01",    "ratio": 1100, "exchange": "NASDAQ"},
+    {"ticker": "TSLA",  "dr": "TSLA80X",   "ratio": 5000, "exchange": "NASDAQ"},
+    {"ticker": "AMD",   "dr": "AMD80X",    "ratio": 5000, "exchange": "NASDAQ"},
+    {"ticker": "AAPL",  "dr": "AAPL80X",   "ratio": 1000, "exchange": "NASDAQ"},
+    {"ticker": "MSFT",  "dr": "MSFT80X",   "ratio": 1000, "exchange": "NASDAQ"},
+    {"ticker": "GOOGL", "dr": "GOOG80X",   "ratio": 500,  "exchange": "NASDAQ"},
+    {"ticker": "META",  "dr": "META80X",   "ratio": 1000, "exchange": "NASDAQ"},
+    {"ticker": "AMZN",  "dr": "AMZN80X",   "ratio": 500,  "exchange": "NASDAQ"},
+    {"ticker": "MU",    "dr": "MICRON01",  "ratio": 1000, "exchange": "NASDAQ"},
+    {"ticker": "COIN",  "dr": "COIN01",    "ratio": 2000, "exchange": "NASDAQ"},
+    {"ticker": "ALAB",  "dr": "ALAB01",    "ratio": 1000, "exchange": "NASDAQ"},
+    {"ticker": "LLY",   "dr": "LLY80X",    "ratio": 1000, "exchange": "NYSE"},
+    {"ticker": "ISRG",  "dr": "ISRG80X",   "ratio": 500,  "exchange": "NASDAQ"},
+    {"ticker": "SOXX",  "dr": "SOXX23",    "ratio": 100,  "exchange": "NASDAQ"},
+    {"ticker": "QQQ",   "dr": "QQQ80X",    "ratio": 1000, "exchange": "NASDAQ"}
 ]
 
 candidates = []
@@ -216,6 +235,7 @@ for item in watchpool:
         hist = t_obj.history(period="3mo", interval="1d")
         c = safe_series(hist, "Close")
         lows = safe_series(hist, "Low")
+        vol = safe_series(hist, "Volume")
         if len(c) < 25:
             continue
 
@@ -227,10 +247,17 @@ for item in watchpool:
         stock_ret = ((curr_p - p_3d) / p_3d) * 100.0
         rs_delta = stock_ret - qqq_3d_ret
 
+        # Bollinger Band Compression
         sma20 = s_c.rolling(20).mean()
         std20 = s_c.rolling(20).std()
         bbw = ((sma20 + 2*std20) - (sma20 - 2*std20)) / sma20 * 100.0
         is_compressed = bool(bbw.iloc[-1] <= bbw.tail(60).quantile(0.25))
+
+        # Volume Dry-Up Gate (VDU)
+        vdu_pass = True
+        if len(vol) >= 20:
+            avg_vol20 = np.mean(vol[-20:])
+            vdu_pass = (vol[-1] <= avg_vol20 * 0.85)
 
         # 5 Trading Days (120 Hours) Earnings Blackout Gate
         imminent_earn = False
@@ -251,18 +278,21 @@ for item in watchpool:
             pass
 
         dist_21 = ((curr_p - ema21) / ema21) * 100.0
-        comp_tag = "📦 Squeeze" if is_compressed else "Normal"
-        earn_tag = " [⚠️ EARN]" if imminent_earn else ""
+        comp_tags = []
+        if is_compressed: comp_tags.append("📦 Sqz")
+        if vdu_pass: comp_tags.append("💧 VDU")
+        tag_str = f"[{' '.join(comp_tags)}]" if comp_tags else "[Normal]"
+        earn_tag = " ⚠️ EARN" if imminent_earn else ""
 
         summary_lines.append(
-            f"• <b>{dr_sym}</b> (${curr_p:.2f}): RS {rs_delta:+.1f}% | 21EMA {dist_21:+.1f}% | {comp_tag}{earn_tag}"
+            f"• <b>{dr_sym}</b> (${curr_p:.2f}): RS {rs_delta:+.1f}% | 21EMA {dist_21:+.1f}% | {tag_str}{earn_tag}"
         )
 
-        # Structural Stop Calculation: min(last 3 days lows) capped at max -2.5%
+        # Structural Stop Calculation: min(last 3 daily lows) capped at max -2.5%
         recent_low = float(np.min(lows[-3:])) if len(lows) >= 3 else curr_p * 0.975
         structural_stop = max(recent_low * 0.998, curr_p * 0.975)
 
-        if (curr_p >= ema21 * 0.99) and (not imminent_earn) and (rs_delta > 0) and risk_authorized:
+        if (curr_p >= ema21 * 0.99) and (not imminent_earn) and (rs_delta > 0) and risk_authorized and not vix_elevated:
             candidates.append({
                 "dr": dr_sym,
                 "ticker": sym,
@@ -320,6 +350,7 @@ if top_picks and risk_authorized and r_thb > 0:
             f"  • <b>T1 (Bank 60% / {t1_units:,} u):</b> Limit <b>฿{target1_thb:.2f}</b> (+1.5R &gt;&gt; Move stop to BE)",
             f"  • <b>T2 (Runner 40% / {t2_units:,} u):</b> Dynamic Trail &gt;&gt; Daily Close &ge; 21 EMA",
             f"  • <b>Time-Stop:</b> 72-Hour Velocity Rule (Flatten if T1 unhit in 3 sessions)",
+            f"  • <b>Slippage Rule:</b> Max 1-tick spread | Min 50k bid depth",
             ""
         ])
 
@@ -328,6 +359,8 @@ if top_picks and risk_authorized and r_thb > 0:
         )
 elif circuit_breaker_active:
     ticket_blocks.append(f"⛔ <b>CIRCUIT BREAKER TRIGGERED:</b>\n• {circuit_reason}\n• All new buy orders suppressed.")
+elif vix_elevated:
+    ticket_blocks.append(f"⚠️ <b>VOLATILITY GATE ACTIVE:</b>\n• VIX at {vix_val:.1f} (&gt; 28.0). High-beta breakouts vetoed.")
 else:
     ticket_blocks.append("📋 <b>EXECUTION:</b> Zero breakout setups qualified. Retain cash in SCB EZ / MMF. <i>(Silent notification)</i>")
 
@@ -338,21 +371,30 @@ if notice_header:
     lines.append(notice_header)
 
 title_tag = "🚨 <b>[ACTION REQUIRED: US DRx ENTRY]</b>" if has_executable_trade else "🇺🇸 <b>[C2C Engine E - Dual-Vault Briefing]</b>"
+vix_icon = "🟢" if vix_val < 20 else ("🟡" if vix_val <= 28 else "🔴 HIGH")
+
 lines.extend([
     title_tag,
     f"📅 <b>Time:</b> {bkk_time_str} BKK",
-    f"💵 <b>USD/THB:</b> ฿{usd_thb:.2f}",
+    f"💵 <b>USD/THB:</b> ฿{usd_thb:.2f} | <b>VIX:</b> {vix_val:.1f} [{vix_icon}]",
     "━━━━━━━━━━━━━━━━━━",
     f"📊 <b>MACRO REGIME:</b> {regime_icon} <b>{regime_name}</b>",
     f"• <b>Risk Budget:</b> <b>{r_label}</b>",
     f"• <b>Vault A Target:</b> <code>{vault_a_alloc}</code>",
     f"• <b>Circuit Status:</b> Streak: <b>{win_streak}W</b> | Daily Stops: <b>{state.get('daily_stopouts', 0)}/2</b>",
     "━━━━━━━━━━━━━━━━━━",
-    "🔍 <b>WATCHPOOL METRICS:</b>",
+    "🔍 <b>WATCHPOOL METRICS (16 Tickers):</b>",
     "\n".join(summary_lines) if summary_lines else "• Data pending",
     "━━━━━━━━━━━━━━━━━━"
 ])
 lines.extend(ticket_blocks)
+
+if is_friday:
+    lines.extend([
+        "━━━━━━━━━━━━━━━━━━",
+        "🛡️ <b>FRIDAY OVERNIGHT DIRECTIVE:</b>",
+        "• If T1 is not banked before market close, tighten stop to BE or flatten to eliminate unhedged weekend gap risk."
+    ])
 
 if settrade_copy_blocks:
     lines.append("━━━━━━━━━━━━━━━━━━\n📲 <b>SETTRADE QUICK-PASTE:</b>")
@@ -361,6 +403,7 @@ if settrade_copy_blocks:
 lines.append("━━━━━━━━━━━━━━━━━━\n<i>Automated pipeline running via GitHub Cloud.</i>")
 full_msg = "\n".join(lines)
 
+# Direct TradingView Charts + InnovestX
 keyboard_buttons = [
     [
         {"text": "📲 Open InnovestX", "url": "https://play.google.com/store/apps/details?id=com.scbs.easyinvest"}
