@@ -208,22 +208,22 @@ if circuit_breaker_active:
 
 # 5. Universe Definition with Sector Benchmarking
 watchpool = [
-    {"ticker": "NVDA",  "dr": "NVDA80X",   "ratio": 200,   "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "SMH"},
-    {"ticker": "PLTR",  "dr": "PLTR01",    "ratio": 1100,  "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "XLK"},
-    {"ticker": "TSLA",  "dr": "TSLA80X",   "ratio": 5000,  "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "QQQ"},
-    {"ticker": "AMD",   "dr": "AMD80X",    "ratio": 5000,  "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "SMH"},
-    {"ticker": "COIN",  "dr": "COIN01",    "ratio": 2000,  "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "QQQ"},
-    {"ticker": "ALAB",  "dr": "ALAB01",    "ratio": 1000,  "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "SMH"},
-    {"ticker": "MU",    "dr": "MICRON01",  "ratio": 1000,  "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "SMH"},
-    {"ticker": "SOXX",  "dr": "SOXX23",    "ratio": 100,   "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "SMH"},
-    {"ticker": "AAPL",  "dr": "AAPL80X",   "ratio": 1000,  "exchange": "NASDAQ", "tier": "MEGA_CORE", "bench": "XLK"},
-    {"ticker": "MSFT",  "dr": "MSFT80X",   "ratio": 1000,  "exchange": "NASDAQ", "tier": "MEGA_CORE", "bench": "XLK"},
-    {"ticker": "GOOGL", "dr": "GOOG80X",   "ratio": 500,   "exchange": "NASDAQ", "tier": "MEGA_CORE", "bench": "QQQ"},
-    {"ticker": "META",  "dr": "META80X",   "ratio": 1000,  "exchange": "NASDAQ", "tier": "MEGA_CORE", "bench": "QQQ"},
-    {"ticker": "AMZN",  "dr": "AMZN80X",   "ratio": 500,   "exchange": "NASDAQ", "tier": "MEGA_CORE", "bench": "QQQ"},
-    {"ticker": "LLY",   "dr": "LLY80X",    "ratio": 1000,  "exchange": "NYSE",   "tier": "MEGA_CORE", "bench": "QQQ"},
-    {"ticker": "ISRG",  "dr": "ISRG80",    "ratio": 1000,  "exchange": "NASDAQ", "tier": "MEGA_CORE", "bench": "QQQ"},
-    {"ticker": "QQQ",   "dr": "QQQ80X",    "ratio": 1000,  "exchange": "NASDAQ", "tier": "MEGA_CORE", "bench": "QQQ"}
+    {"ticker": "NVDA",  "dr": "NVDA80X",   "ratio": 200,   "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "SMH", "is_etf": False},
+    {"ticker": "PLTR",  "dr": "PLTR01",    "ratio": 1100,  "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "XLK", "is_etf": False},
+    {"ticker": "TSLA",  "dr": "TSLA80X",   "ratio": 5000,  "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "QQQ", "is_etf": False},
+    {"ticker": "AMD",   "dr": "AMD80X",    "ratio": 5000,  "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "SMH", "is_etf": False},
+    {"ticker": "COIN",  "dr": "COIN01",    "ratio": 2000,  "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "QQQ", "is_etf": False},
+    {"ticker": "ALAB",  "dr": "ALAB01",    "ratio": 1000,  "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "SMH", "is_etf": False},
+    {"ticker": "MU",    "dr": "MICRON01",  "ratio": 1000,  "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "SMH", "is_etf": False},
+    {"ticker": "SOXX",  "dr": "SOXX23",    "ratio": 100,   "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "SMH", "is_etf": True},
+    {"ticker": "AAPL",  "dr": "AAPL80X",   "ratio": 1000,  "exchange": "NASDAQ", "tier": "MEGA_CORE", "bench": "XLK", "is_etf": False},
+    {"ticker": "MSFT",  "dr": "MSFT80X",   "ratio": 1000,  "exchange": "NASDAQ", "tier": "MEGA_CORE", "bench": "XLK", "is_etf": False},
+    {"ticker": "GOOGL", "dr": "GOOG80X",   "ratio": 500,   "exchange": "NASDAQ", "tier": "MEGA_CORE", "bench": "QQQ", "is_etf": False},
+    {"ticker": "META",  "dr": "META80X",   "ratio": 1000,  "exchange": "NASDAQ", "tier": "MEGA_CORE", "bench": "QQQ", "is_etf": False},
+    {"ticker": "AMZN",  "dr": "AMZN80X",   "ratio": 500,   "exchange": "NASDAQ", "tier": "MEGA_CORE", "bench": "QQQ", "is_etf": False},
+    {"ticker": "LLY",   "dr": "LLY80X",    "ratio": 1000,  "exchange": "NYSE",   "tier": "MEGA_CORE", "bench": "QQQ", "is_etf": False},
+    {"ticker": "ISRG",  "dr": "ISRG80",    "ratio": 1000,  "exchange": "NASDAQ", "tier": "MEGA_CORE", "bench": "QQQ", "is_etf": False},
+    {"ticker": "QQQ",   "dr": "QQQ80X",    "ratio": 1000,  "exchange": "NASDAQ", "tier": "MEGA_CORE", "bench": "QQQ", "is_etf": True}
 ]
 
 candidates = []
@@ -236,6 +236,8 @@ for item in watchpool:
     exchange = item["exchange"]
     tier = item["tier"]
     bench_sym = item["bench"]
+    is_etf = item.get("is_etf", False)
+
     try:
         t_obj = yf.Ticker(sym)
         hist = t_obj.history(period="3mo", interval="1d")
@@ -271,21 +273,22 @@ for item in watchpool:
             vdu_pass = (vol[-1] <= avg_vol20 * 0.85)
 
         imminent_earn = False
-        try:
-            cal = t_obj.calendar
-            if cal is not None and not (isinstance(cal, pd.DataFrame) and cal.empty):
-                dt = None
-                if isinstance(cal, pd.DataFrame) and "Earnings Date" in cal.index:
-                    dt = pd.to_datetime(cal.loc["Earnings Date"].iloc[0])
-                elif isinstance(cal, dict) and "Earnings Date" in cal:
-                    dt = pd.to_datetime(cal["Earnings Date"][0])
-                if dt:
-                    dt_naive = dt.tz_localize(None) if dt.tzinfo else dt
-                    days_diff = (dt_naive - datetime.now()).days
-                    if 0 <= days_diff <= 5:
-                        imminent_earn = True
-        except Exception:
-            pass
+        if not is_etf:
+            try:
+                cal = t_obj.calendar
+                if cal is not None and not (isinstance(cal, pd.DataFrame) and cal.empty):
+                    dt = None
+                    if isinstance(cal, pd.DataFrame) and "Earnings Date" in cal.index:
+                        dt = pd.to_datetime(cal.loc["Earnings Date"].iloc[0])
+                    elif isinstance(cal, dict) and "Earnings Date" in cal:
+                        dt = pd.to_datetime(cal["Earnings Date"][0])
+                    if dt:
+                        dt_naive = dt.tz_localize(None) if dt.tzinfo else dt
+                        days_diff = (dt_naive - datetime.now()).days
+                        if 0 <= days_diff <= 5:
+                            imminent_earn = True
+            except Exception:
+                pass
 
         dist_21 = ((curr_p - ema21) / ema21) * 100.0
         comp_tags = []
@@ -360,3 +363,14 @@ if top_picks and risk_authorized and r_thb > 0:
             t1_tag = "+2.0R Volatility Target"
         else:
             t1_multiple = 1.5
+            t1_pct = 0.60
+            t1_tag = "+1.5R Core Bank"
+
+        target1_thb = entry_thb + (t1_multiple * risk_per_unit)
+        t1_units = int(units * t1_pct)
+        t2_units = units - t1_units
+        stop_pct = ((stop_usd - entry_usd) / entry_usd) * 100.0
+
+        ticket_blocks.extend([
+            f"🎯 <b>{p['dr']} ({p['ticker']}) - [{tier}] (vs {p['bench']}):</b>",
+            
