@@ -1,12 +1,12 @@
-name: C2C Engine E (Equities & US DR Scanner)
+name: C2C Engine E (US Equities & DR Scanner)
 
 on:
   schedule:
-    - cron: '0 13 * * 1-5'
+    - cron: '45 12 * * 1-5'   # 19:45 BKK Monday to Friday (US Pre-Market)
   workflow_dispatch:
     inputs:
       trade_outcome:
-        description: 'Update trade outcome (win / stopout / reset / none)'
+        description: 'Update trade state outcome'
         required: false
         default: 'none'
         type: choice
@@ -16,17 +16,15 @@ on:
           - stopout
           - reset
 
+permissions:
+  contents: write
+
 jobs:
-  scan-equities:
+  scan-and-brief:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 1
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -35,20 +33,19 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install --upgrade pip
-          pip install requests yfinance pandas numpy pytz exchange_calendars
+          pip install yfinance pandas numpy requests pytz exchange_calendars
 
       - name: Run Engine E Script
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           EVENT_NAME: ${{ github.event_name }}
-          INPUT_OUTCOME: ${{ github.event.inputs.trade_outcome }}
+          INPUT_OUTCOME: ${{ github.event.inputs.trade_outcome || 'none' }}
         run: python engine_e.py
 
-      - name: Commit Updated State
+      - name: Auto-Commit Persistent State
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "C2C State Engine"
+          git config --global user.email "bot@code2cash.internal"
           git add state.json
-          git diff --quiet && git diff --staged --quiet || (git commit -m "chore(state): update trade engine state [skip ci]" && git push origin HEAD:main) || true
+          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: update engine_e state [skip ci]" && git push)
