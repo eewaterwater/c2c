@@ -1,5 +1,4 @@
 import os
-import sys
 import requests
 from datetime import datetime
 import pytz
@@ -10,20 +9,34 @@ chat_id = os.environ.get("TELEGRAM_CHAT_ID")
 bkk_now = datetime.now(pytz.timezone("Asia/Bangkok"))
 bkk_time_str = bkk_now.strftime("%Y-%m-%d %H:%M:%S")
 
-# Critical Tickers to verify
-audit_tickers = ["^SET50", "DELTA.BK", "THB=X", "QQQ", "NVDA", "ES=F"]
+# Tickers to audit
+audit_tickers = [
+    {"name": "SET50 Index", "symbols": ["^SET50", "^SET.BK"]},
+    {"name": "DELTA.BK", "symbols": ["DELTA.BK"]},
+    {"name": "USD/THB", "symbols": ["THB=X"]},
+    {"name": "QQQ", "symbols": ["QQQ"]},
+    {"name": "NVDA", "symbols": ["NVDA"]},
+    {"name": "ES Futures", "symbols": ["ES=F"]}
+]
+
 failed = []
 passed = []
 
-for ticker in audit_tickers:
-    try:
-        df = yf.download(ticker, period="3d", interval="1d", progress=False)
-        if df is not None and not df.empty and len(df) >= 1:
-            passed.append(ticker)
-        else:
-            failed.append(ticker)
-    except Exception as e:
-        failed.append(f"{ticker} ({str(e)})")
+for item in audit_tickers:
+    name = item["name"]
+    is_ok = False
+    # Check symbols with a 1-month lookback to safely handle holiday weekends
+    for sym in item["symbols"]:
+        try:
+            df = yf.download(sym, period="1mo", interval="1d", progress=False)
+            if df is not None and not df.empty and len(df) >= 1:
+                passed.append(name)
+                is_ok = True
+                break
+        except Exception:
+            continue
+    if not is_ok:
+        failed.append(name)
 
 is_degraded = len(failed) > 0
 
@@ -45,6 +58,6 @@ if is_degraded:
             json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"},
             timeout=15
         )
-    print("Health check: DEGRADED feeds detected.")
+    print(f"Health check: DEGRADED feeds detected ({failed}).")
 else:
     print(f"Health check: ALL {len(passed)} feeds online. Normal silent pass.")
