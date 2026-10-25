@@ -143,6 +143,7 @@ r_label = "0.50R (฿15,000 THB)"
 vault_a_alloc = "35% QQQ / 25% SMH / 40% SGOV"
 risk_authorized = not circuit_breaker_active
 qqq_3d_ret = 0.0
+qqq_10d_ret = 0.0
 
 try:
     qqq_df = yf.download("QQQ", period="1y", interval="1d", progress=False)
@@ -157,6 +158,8 @@ try:
 
         if len(c_qqq) >= 4:
             qqq_3d_ret = ((p_now - c_qqq[-4]) / c_qqq[-4]) * 100.0
+        if len(c_qqq) >= 11:
+            qqq_10d_ret = ((p_now - c_qqq[-11]) / c_qqq[-11]) * 100.0
 
         is_bear_confirmed = False
         if len(c_qqq) >= 3 and len(sma200_series) >= 3:
@@ -179,7 +182,7 @@ try:
                 r_label = f"1.50R (฿45,000 THB) 🔥 [Streak: {win_streak}W]"
             elif vix_elevated:
                 r_thb = 15000.0
-                r_label = f"0.50R (฿15,000 THB) [VIX Spike Dampener ({vix_val:.1f})]"
+                r_label = f"0.50R (฿15,000 THB) [VIX Spike ({vix_val:.1f})]"
             else:
                 r_thb = 30000.0
                 r_label = "1.00R (฿30,000 THB)"
@@ -204,24 +207,24 @@ if circuit_breaker_active:
     r_label = f"0.0R (HALTED: {circuit_reason})"
     risk_authorized = False
 
-# 6. Core Watchpool (Verified Thai DR / DRx Conversion Ratios)
+# 6. Core Watchpool (High-Beta vs Mature Tech Classifications)
 watchpool = [
-    {"ticker": "NVDA",  "dr": "NVDA80X",   "ratio": 200,   "exchange": "NASDAQ"},
-    {"ticker": "PLTR",  "dr": "PLTR01",    "ratio": 1100,  "exchange": "NASDAQ"},
-    {"ticker": "TSLA",  "dr": "TSLA80X",   "ratio": 5000,  "exchange": "NASDAQ"},
-    {"ticker": "AMD",   "dr": "AMD80X",    "ratio": 5000,  "exchange": "NASDAQ"},
-    {"ticker": "AAPL",  "dr": "AAPL80X",   "ratio": 1000,  "exchange": "NASDAQ"},
-    {"ticker": "MSFT",  "dr": "MSFT80X",   "ratio": 1000,  "exchange": "NASDAQ"},
-    {"ticker": "GOOGL", "dr": "GOOG80X",   "ratio": 500,   "exchange": "NASDAQ"},
-    {"ticker": "META",  "dr": "META80X",   "ratio": 1000,  "exchange": "NASDAQ"},
-    {"ticker": "AMZN",  "dr": "AMZN80X",   "ratio": 500,   "exchange": "NASDAQ"},
-    {"ticker": "MU",    "dr": "MICRON01",  "ratio": 1000,  "exchange": "NASDAQ"},
-    {"ticker": "COIN",  "dr": "COIN01",    "ratio": 2000,  "exchange": "NASDAQ"},
-    {"ticker": "ALAB",  "dr": "ALAB01",    "ratio": 1000,  "exchange": "NASDAQ"},
-    {"ticker": "LLY",   "dr": "LLY80X",    "ratio": 1000,  "exchange": "NYSE"},
-    {"ticker": "ISRG",  "dr": "ISRG80",    "ratio": 1000,  "exchange": "NASDAQ"},
-    {"ticker": "SOXX",  "dr": "SOXX23",    "ratio": 100,   "exchange": "NASDAQ"},
-    {"ticker": "QQQ",   "dr": "QQQ80X",    "ratio": 1000,  "exchange": "NASDAQ"}
+    {"ticker": "NVDA",  "dr": "NVDA80X",   "ratio": 200,   "exchange": "NASDAQ", "tier": "HIGH_BETA"},
+    {"ticker": "PLTR",  "dr": "PLTR01",    "ratio": 1100,  "exchange": "NASDAQ", "tier": "HIGH_BETA"},
+    {"ticker": "TSLA",  "dr": "TSLA80X",   "ratio": 5000,  "exchange": "NASDAQ", "tier": "HIGH_BETA"},
+    {"ticker": "AMD",   "dr": "AMD80X",    "ratio": 5000,  "exchange": "NASDAQ", "tier": "HIGH_BETA"},
+    {"ticker": "COIN",  "dr": "COIN01",    "ratio": 2000,  "exchange": "NASDAQ", "tier": "HIGH_BETA"},
+    {"ticker": "ALAB",  "dr": "ALAB01",    "ratio": 1000,  "exchange": "NASDAQ", "tier": "HIGH_BETA"},
+    {"ticker": "MU",    "dr": "MICRON01",  "ratio": 1000,  "exchange": "NASDAQ", "tier": "HIGH_BETA"},
+    {"ticker": "SOXX",  "dr": "SOXX23",    "ratio": 100,   "exchange": "NASDAQ", "tier": "HIGH_BETA"},
+    {"ticker": "AAPL",  "dr": "AAPL80X",   "ratio": 1000,  "exchange": "NASDAQ", "tier": "MEGA_CORE"},
+    {"ticker": "MSFT",  "dr": "MSFT80X",   "ratio": 1000,  "exchange": "NASDAQ", "tier": "MEGA_CORE"},
+    {"ticker": "GOOGL", "dr": "GOOG80X",   "ratio": 500,   "exchange": "NASDAQ", "tier": "MEGA_CORE"},
+    {"ticker": "META",  "dr": "META80X",   "ratio": 1000,  "exchange": "NASDAQ", "tier": "MEGA_CORE"},
+    {"ticker": "AMZN",  "dr": "AMZN80X",   "ratio": 500,   "exchange": "NASDAQ", "tier": "MEGA_CORE"},
+    {"ticker": "LLY",   "dr": "LLY80X",    "ratio": 1000,  "exchange": "NYSE",   "tier": "MEGA_CORE"},
+    {"ticker": "ISRG",  "dr": "ISRG80",    "ratio": 1000,  "exchange": "NASDAQ", "tier": "MEGA_CORE"},
+    {"ticker": "QQQ",   "dr": "QQQ80X",    "ratio": 1000,  "exchange": "NASDAQ", "tier": "MEGA_CORE"}
 ]
 
 candidates = []
@@ -232,6 +235,7 @@ for item in watchpool:
     dr_sym = item["dr"]
     ratio = item["ratio"]
     exchange = item["exchange"]
+    tier = item["tier"]
     try:
         t_obj = yf.Ticker(sym)
         hist = t_obj.history(period="3mo", interval="1d")
@@ -245,9 +249,15 @@ for item in watchpool:
         s_c = pd.Series(c)
         ema21 = float(s_c.ewm(span=21, adjust=False).mean().iloc[-1])
 
+        # Blended Multi-Timeframe Relative Strength (60% 3-day / 40% 10-day)
         p_3d = float(c[-4]) if len(c) >= 4 else curr_p
-        stock_ret = ((curr_p - p_3d) / p_3d) * 100.0
-        rs_delta = stock_ret - qqq_3d_ret
+        p_10d = float(c[-11]) if len(c) >= 11 else curr_p
+        ret_3d = ((curr_p - p_3d) / p_3d) * 100.0
+        ret_10d = ((curr_p - p_10d) / p_10d) * 100.0
+
+        rs_delta_3d = ret_3d - qqq_3d_ret
+        rs_delta_10d = ret_10d - qqq_10d_ret
+        composite_rs = (0.60 * rs_delta_3d) + (0.40 * rs_delta_10d)
 
         # Bollinger Band Compression
         sma20 = s_c.rolling(20).mean()
@@ -287,20 +297,21 @@ for item in watchpool:
         earn_tag = " ⚠️ EARN" if imminent_earn else ""
 
         summary_lines.append(
-            f"• <b>{dr_sym}</b> (${curr_p:.2f}): RS {rs_delta:+.1f}% | 21EMA {dist_21:+.1f}% | {tag_str}{earn_tag}"
+            f"• <b>{dr_sym}</b> (${curr_p:.2f}): RS {composite_rs:+.1f}% | 21EMA {dist_21:+.1f}% | {tag_str}{earn_tag}"
         )
 
         recent_low = float(np.min(lows[-3:])) if len(lows) >= 3 else curr_p * 0.975
         structural_stop = max(recent_low * 0.998, curr_p * 0.975)
 
-        if (curr_p >= ema21 * 0.99) and (not imminent_earn) and (rs_delta > 0) and risk_authorized and not vix_elevated:
+        if (curr_p >= ema21 * 0.99) and (not imminent_earn) and (composite_rs > 0) and risk_authorized and not vix_elevated:
             candidates.append({
                 "dr": dr_sym,
                 "ticker": sym,
+                "tier": tier,
                 "exchange": exchange,
                 "usd_price": curr_p,
                 "ratio": ratio,
-                "rs": rs_delta,
+                "rs": composite_rs,
                 "stop_usd": structural_stop
             })
     except Exception as e:
@@ -315,11 +326,12 @@ has_executable_trade = False
 
 if top_picks and risk_authorized and r_thb > 0:
     has_executable_trade = True
-    ticket_blocks.append("📋 <b>STAGED HIGH-VELOCITY TICKETS (THB Sized):</b>")
+    ticket_blocks.append("📋 <b>OPTIMIZED ALPHA TICKETS (THB Sized):</b>")
     for p in top_picks:
         entry_usd = p["usd_price"]
         stop_usd = p["stop_usd"]
         ratio = p["ratio"]
+        tier = p["tier"]
 
         entry_thb = (entry_usd * usd_thb) / ratio
         stop_thb = (stop_usd * usd_thb) / ratio
@@ -330,7 +342,7 @@ if top_picks and risk_authorized and r_thb > 0:
 
         raw_units = int(r_thb / risk_per_unit)
         raw_outlay = raw_units * entry_thb
-        max_cap = 600000.0
+        max_cap = 600000.0  # 20% Hard Cap of ฿3.0M Vault B
         if raw_outlay > max_cap:
             units = int(max_cap / entry_thb)
             capped_tag = " <i>(Capped at 20% Vault B)</i>"
@@ -338,20 +350,32 @@ if top_picks and risk_authorized and r_thb > 0:
             units = raw_units
             capped_tag = ""
 
-        target1_thb = entry_thb + (1.5 * risk_per_unit)
-        t1_units = int(units * 0.60)
+        # Dynamic Payoff Targets: +2.0R for High-Beta, +1.5R for Mega-Core
+        if tier == "HIGH_BETA":
+            t1_multiple = 2.0
+            t1_pct = 0.50
+            t1_tag = "+2.0R Volatility Target"
+        else:
+            t1_multiple = 1.5
+            t1_pct = 0.60
+            t1_tag = "+1.5R Core Bank"
+
+        target1_thb = entry_thb + (t1_multiple * risk_per_unit)
+        t1_units = int(units * t1_pct)
         t2_units = units - t1_units
         stop_pct = ((stop_usd - entry_usd) / entry_usd) * 100.0
 
         ticket_blocks.extend([
-            f"🎯 <b>{p['dr']} ({p['ticker']}) Setup:</b>",
+            f"🎯 <b>{p['dr']} ({p['ticker']}) - [{tier}]:</b>",
             f"  • Entry: <b>฿{entry_thb:.2f}</b> (${entry_usd:.2f})",
-            f"  • Hard Stop: <b>฿{stop_thb:.2f}</b> ({stop_pct:.1f}% structural pivot)",
+            f"  • Hard Stop: <b>฿{stop_thb:.2f}</b> ({stop_pct:.1f}% pivot)",
             f"  • Sizing: <b>{units:,} units</b> (Outlay: ฿{units*entry_thb:,.0f} THB){capped_tag}",
-            f"  • <b>T1 (Bank 60% / {t1_units:,} u):</b> Limit <b>฿{target1_thb:.2f}</b> (+1.5R &gt;&gt; Move stop to BE)",
-            f"  • <b>T2 (Runner 40% / {t2_units:,} u):</b> Dynamic Trail &gt;&gt; Daily Close &ge; 21 EMA",
-            f"  • <b>Time-Stop:</b> 72-Hour Velocity Rule (Flatten if T1 unhit in 3 sessions)",
-            f"  • <b>Slippage Rule:</b> Max 1-tick spread | Min 50k bid depth",
+            f"  • <b>T1 ({int(t1_pct*100)}% / {t1_units:,} u):</b> Limit <b>฿{target1_thb:.2f}</b> ({t1_tag} &gt;&gt; Move stop to BE)",
+            f"  • <b>T2 Runner ({int((1-t1_pct)*100)}% / {t2_units:,} u):</b> Trail Daily Close &ge; 21 EMA",
+            f"  • <b>⚡ Free-Roll Pyramiding:</b> On T1 hit, add <b>+{int(units*0.30):,} u</b> on next 15M breakout base (Stop @ BE)",
+            f"  • <b>🛡️ 4-Candle Stall Rule:</b> If 4x 15M candles stall without new highs, pull stop to <b>-0.5R (฿{entry_thb - (0.5*risk_per_unit):.2f})</b>",
+            f"  • <b>Time-Stop:</b> Flatten if T1 unhit in 72 hours (3 sessions)",
+            f"  • <b>Slippage:</b> Max 1-tick spread | Min 50k bid depth",
             ""
         ])
 
@@ -382,7 +406,7 @@ lines.extend([
     f"• <b>Vault A Target:</b> <code>{vault_a_alloc}</code>",
     f"• <b>Circuit Status:</b> Streak: <b>{win_streak}W</b> | Daily Stops: <b>{state.get('daily_stopouts', 0)}/2</b>",
     "━━━━━━━━━━━━━━━━━━",
-    "🔍 <b>WATCHPOOL METRICS (16 Tickers):</b>",
+    "🔍 <b>WATCHPOOL METRICS (16 Tickers - Blended 3D/10D RS):</b>",
     "\n".join(summary_lines) if summary_lines else "• Data pending",
     "━━━━━━━━━━━━━━━━━━"
 ])
@@ -440,3 +464,4 @@ if token and chat_id:
         print(f"Telegram response: {res.text}")
 else:
     print("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
+    
