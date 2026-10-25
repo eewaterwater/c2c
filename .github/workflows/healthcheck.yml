@@ -1,0 +1,28 @@
+name: C2C Pre-Flight Health Check
+
+on:
+  schedule:
+    - cron: '15 2 * * 1-5'    # 09:15 BKK Monday to Friday (Pre-TFEX open)
+    - cron: '0 12 * * 1-5'    # 19:00 BKK Monday to Friday (Pre-US screening)
+  workflow_dispatch:
+
+jobs:
+  run-preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: pip install yfinance requests pytz
+
+      - name: Execute Health Check
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python healthcheck.py
