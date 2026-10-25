@@ -98,7 +98,7 @@ def safe_series(df, col="Close"):
     except Exception:
         return np.array([])
 
-# 3. Macro Feeds (USD/THB, VIX, Benchmarks: QQQ, SMH, XLK)
+# 3. Macro Feeds
 usd_thb = 35.0
 try:
     thb_df = yf.download("THB=X", period="5d", interval="1d", progress=False)
@@ -206,7 +206,7 @@ if circuit_breaker_active:
     r_label = f"0.0R (HALTED: {circuit_reason})"
     risk_authorized = False
 
-# 5. Universe Definition with Sector Benchmarking
+# 5. Universe Definition
 watchpool = [
     {"ticker": "NVDA",  "dr": "NVDA80X",   "ratio": 200,   "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "SMH", "is_etf": False},
     {"ticker": "PLTR",  "dr": "PLTR01",    "ratio": 1100,  "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "XLK", "is_etf": False},
@@ -251,7 +251,6 @@ for item in watchpool:
         s_c = pd.Series(c)
         ema21 = float(s_c.ewm(span=21, adjust=False).mean().iloc[-1])
 
-        # Sector Relative Strength
         b_3d, b_10d = bench_returns.get(bench_sym, (qqq_3d, qqq_10d))
         p_3d = float(c[-4]) if len(c) >= 4 else curr_p
         p_10d = float(c[-11]) if len(c) >= 11 else curr_p
@@ -371,6 +370,125 @@ if top_picks and risk_authorized and r_thb > 0:
         t2_units = units - t1_units
         stop_pct = ((stop_usd - entry_usd) / entry_usd) * 100.0
 
-        ticket_blocks.extend([
-            f"🎯 <b>{p['dr']} ({p['ticker']}) - [{tier}] (vs {p['bench']}):</b>",
-            
+        ticket_card = (
+            f"🎯 <b>{p['dr']} ({p['ticker']}) - [{tier}] (vs {p['bench']}):</b>\n"
+            f"  • Entry: <b>฿{entry_thb:.2f}</b> (${entry_usd:.2f}) [21EMA: {p['dist_21']:+.1f}%]\n"
+            f"  • Hard Stop: <b>฿{stop_thb:.2f}</b> ({stop_pct:.1f}% pivot)\n"
+            f"  • Sizing: <b>{units:,} units</b> (Outlay: ฿{units*entry_thb:,.0f} THB){capped_tag}\n"
+            f"  • <b>T1 ({int(t1_pct*100)}% / {t1_units:,} u):</b> Limit <b>฿{target1_thb:.2f}</b> ({t1_tag} &gt;&gt; Move stop to BE)\n"
+            f"  • <b>T2 Runner ({int((1-t1_pct)*100)}% / {t2_units:,} u):</b> Trail Daily Close &ge; 21 EMA\n"
+            f"  • <b>⚡ Free-Roll Pyramiding:</b> On T1 hit, add <b>+{int(units*0.30):,} u</b> on next 15M breakout base (Stop @ BE)\n"
+            f"  • <b>🛡️ 4-Candle Stall Rule:</b> If 4x 15M candles stall without new highs, pull stop to <b>-0.5R (฿{entry_thb - (0.5*risk_per_unit):.2f})</b>\n"
+            f"  • <b>🛡️ LP Spread Guard:</b> Max Buy Limit = Offer + 1 tick. If Bid/Offer spread &gt; 0.4%, DO NOT CHASE.\n"
+            f"  • <b>Time-Stop:</b> Flatten if T1 unhit in 72 hours (3 sessions)\n"
+        )
+        ticket_blocks.append(ticket_card)
+
+        settrade_copy_blocks.append(
+            f"<code>BUY {p['dr']} @ ฿{entry_thb:.2f} | Vol: {units:,} | Stop: ฿{stop_thb:.2f}</code>"
+        )
+elif circuit_breaker_active:
+    ticket_blocks.append(f"⛔ <b>CIRCUIT BREAKER TRIGGERED:</b>\n• {circuit_reason}\n• All new buy orders suppressed.")
+elif vix_elevated:
+    ticket_blocks.append(f"⚠️ <b>VOLATILITY GATE ACTIVE:</b>\n• VIX at {vix_val:.1f} (&gt; 28.0). High-beta breakouts vetoed.")
+else:
+    ticket_blocks.append("📋 <b>EXECUTION:</b> Zero breakout setups qualified in launchpad envelope. Retain cash in SCB EZ / MMF.")
+
+lines = []
+if notice_header:
+    lines.append(notice_header)
+
+title_tag = "🚨 <b>[ACTION REQUIRED: US DRx ENTRY]</b>" if has_executable_trade else "🇺🇸 <b>[C2C Engine E - Dual-Vault Briefing]</b>"
+vix_icon = "🟢" if vix_val < 20 else ("🟡" if vix_val <= 28 else "🔴 HIGH")
+
+lines.extend([
+    title_tag,
+    f"📅 <b>Time:</b> {bkk_time_str} BKK",
+    f"💵 <b>USD/THB:</b> ฿{usd_thb:.2f} | <b>VIX:</b> {vix_val:.1f} [{vix_icon}]",
+    "━━━━━━━━━━━━━━━━━━",
+    f"📊 <b>MACRO REGIME:</b> {regime_icon} <b>{regime_name}</b>",
+    f"• <b>Risk Budget:</b> <b>{r_label}</b>",
+    f"• <b>Vault A Target:</b> <code>{vault_a_alloc}</code>",
+    f"• <b>Circuit Status:</b> Streak: <b>{win_streak}W</b> | Daily Stops: <b>{state.get('daily_stopouts', 0)}/2</b>",
+    "━━━━━━━━━━━━━━━━━━",
+    "🔍 <b>WATCHPOOL METRICS (Sector-Benchmarked RS):</b>",
+    "\n".join(summary_lines) if summary_lines else "• Data pending",
+    "━━━━━━━━━━━━━━━━━━"
+])
+lines.extend(ticket_blocks)
+
+if is_friday:
+    lines.extend([
+        "━━━━━━━━━━━━━━━━━━",
+        "🛡️ <b>FRIDAY OVERNIGHT COLLAR DIRECTIVE:</b>",
+        "• If T1 is not banked before market close, tighten stop to BE or flatten to eliminate unhedged weekend gap risk.",
+        "• If Net Long Exposure &gt; ฿1.5M and VIX &gt; 22, park hedge tranche in SGOV."
+    ])
+
+if settrade_copy_blocks:
+    lines.append("━━━━━━━━━━━━━━━━━━\n📲 <b>SETTRADE QUICK-PASTE:</b>")
+    lines.extend(settrade_copy_blocks)
+
+lines.append("━━━━━━━━━━━━━━━━━━\n<i>Automated pipeline running via GitHub Cloud.</i>")
+full_msg = "\n".join(lines)
+
+keyboard_buttons = [
+    [
+        {"text": "📲 Open InnovestX", "url": "https://play.google.com/store/apps/details?id=com.scbs.easyinvest"}
+    ]
+]
+
+if top_picks:
+    for p in top_picks:
+        sym = p["ticker"]
+        exch = p.get("exchange", "NASDAQ")
+        tv_chart_url = f"https://www.tradingview.com/chart/?symbol={exch}%3A{sym}"
+        keyboard_buttons.append([
+            {"text": f"📈 {sym} Chart", "url": tv_chart_url}
+        ])
+else:
+    keyboard_buttons.append([
+        {"text": "📈 QQQ Chart", "url": "https://www.tradingview.com/chart/?symbol=NASDAQ%3AQQQ"}
+    ])
+
+keyboard = {"inline_keyboard": keyboard_buttons}
+
+print(f"Message length: {len(full_msg)} chars")
+if token and chat_id:
+    res = requests.post(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        json={
+            "chat_id": chat_id,
+            "text": full_msg,
+            "parse_mode": "HTML",
+            "disable_notification": False,
+            "reply_markup": keyboard
+        },
+        timeout=20
+    )
+    print(f"Telegram status: {res.status_code}")
+    if res.status_code != 200:
+        print(f"Telegram error response: {res.text}")
+        clean_plain = (
+            full_msg.replace("<b>", "")
+            .replace("</b>", "")
+            .replace("<code>", "")
+            .replace("</code>", "")
+            .replace("<i>", "")
+            .replace("</i>", "")
+            .replace("&gt;", ">")
+            .replace("&lt;", "<")
+        )
+        res_fb = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": clean_plain,
+                "disable_notification": False,
+                "reply_markup": keyboard
+            },
+            timeout=20
+        )
+        print(f"Fallback plain text status: {res_fb.status_code}")
+else:
+    print(f"Credentials missing. token={bool(token)}, chat_id={bool(chat_id)}")
