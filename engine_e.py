@@ -249,7 +249,7 @@ for item in watchpool:
         s_c = pd.Series(c)
         ema21 = float(s_c.ewm(span=21, adjust=False).mean().iloc[-1])
 
-        # Sector Relative Strength (60% 3D / 40% 10D vs Direct Sector Bench)
+        # Sector Relative Strength
         b_3d, b_10d = bench_returns.get(bench_sym, (qqq_3d, qqq_10d))
         p_3d = float(c[-4]) if len(c) >= 4 else curr_p
         p_10d = float(c[-11]) if len(c) >= 11 else curr_p
@@ -260,7 +260,6 @@ for item in watchpool:
         rs_delta_10d = ret_10d - b_10d
         composite_rs = (0.60 * rs_delta_3d) + (0.40 * rs_delta_10d)
 
-        # Volatility Squeeze & Volume Dry-Up
         sma20 = s_c.rolling(20).mean()
         std20 = s_c.rolling(20).std()
         bbw = ((sma20 + 2*std20) - (sma20 - 2*std20)) / sma20 * 100.0
@@ -302,9 +301,7 @@ for item in watchpool:
         recent_low = float(np.min(lows[-3:])) if len(lows) >= 3 else curr_p * 0.975
         structural_stop = max(recent_low * 0.998, curr_p * 0.975)
 
-        # PLAYBOOK ANTI-CHASE ENVELOPE:
-        # 1. Price must be within -1.0% to +2.0% of 21 EMA (No overextended chasing)
-        # 2. Must show structural base quality (Squeeze OR Volume Dry-Up)
+        # Anti-Chase Envelope: Must be between -1.0% and +2.0% of 21 EMA
         within_ema_envelope = (-1.0 <= dist_21 <= 2.0)
         base_quality_ok = is_compressed or vdu_pass
 
@@ -316,4 +313,50 @@ for item in watchpool:
                 "bench": bench_sym,
                 "exchange": exchange,
                 "usd_price": curr_p,
-                "ratio":
+                "ratio": ratio,
+                "rs": composite_rs,
+                "dist_21": dist_21,
+                "stop_usd": structural_stop
+            })
+    except Exception as e:
+        print(f"Error {sym}: {e}")
+
+candidates.sort(key=lambda x: x["rs"], reverse=True)
+top_picks = candidates[:2]
+
+ticket_blocks = []
+settrade_copy_blocks = []
+has_executable_trade = False
+
+if top_picks and risk_authorized and r_thb > 0:
+    has_executable_trade = True
+    ticket_blocks.append("📋 <b>OPTIMIZED ALPHA TICKETS (THB Sized):</b>")
+    for p in top_picks:
+        entry_usd = p["usd_price"]
+        stop_usd = p["stop_usd"]
+        ratio = p["ratio"]
+        tier = p["tier"]
+
+        entry_thb = (entry_usd * usd_thb) / ratio
+        stop_thb = (stop_usd * usd_thb) / ratio
+        risk_per_unit = entry_thb - stop_thb
+
+        if risk_per_unit <= 0.001:
+            continue
+
+        raw_units = int(r_thb / risk_per_unit)
+        raw_outlay = raw_units * entry_thb
+        max_cap = 600000.0
+        if raw_outlay > max_cap:
+            units = int(max_cap / entry_thb)
+            capped_tag = " <i>(Capped at 20% Vault B)</i>"
+        else:
+            units = raw_units
+            capped_tag = ""
+
+        if tier == "HIGH_BETA":
+            t1_multiple = 2.0
+            t1_pct = 0.50
+            t1_tag = "+2.0R Volatility Target"
+        else:
+            t1_multiple = 1.5
