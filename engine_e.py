@@ -260,6 +260,7 @@ for item in watchpool:
         rs_delta_10d = ret_10d - b_10d
         composite_rs = (0.60 * rs_delta_3d) + (0.40 * rs_delta_10d)
 
+        # Volatility Squeeze & Volume Dry-Up
         sma20 = s_c.rolling(20).mean()
         std20 = s_c.rolling(20).std()
         bbw = ((sma20 + 2*std20) - (sma20 - 2*std20)) / sma20 * 100.0
@@ -301,7 +302,13 @@ for item in watchpool:
         recent_low = float(np.min(lows[-3:])) if len(lows) >= 3 else curr_p * 0.975
         structural_stop = max(recent_low * 0.998, curr_p * 0.975)
 
-        if (curr_p >= ema21 * 0.99) and (not imminent_earn) and (composite_rs > 0) and risk_authorized and not vix_elevated:
+        # PLAYBOOK ANTI-CHASE ENVELOPE:
+        # 1. Price must be within -1.0% to +2.0% of 21 EMA (No overextended chasing)
+        # 2. Must show structural base quality (Squeeze OR Volume Dry-Up)
+        within_ema_envelope = (-1.0 <= dist_21 <= 2.0)
+        base_quality_ok = is_compressed or vdu_pass
+
+        if within_ema_envelope and base_quality_ok and (not imminent_earn) and (composite_rs > 0) and risk_authorized and not vix_elevated:
             candidates.append({
                 "dr": dr_sym,
                 "ticker": sym,
@@ -309,178 +316,4 @@ for item in watchpool:
                 "bench": bench_sym,
                 "exchange": exchange,
                 "usd_price": curr_p,
-                "ratio": ratio,
-                "rs": composite_rs,
-                "stop_usd": structural_stop
-            })
-    except Exception as e:
-        print(f"Error {sym}: {e}")
-
-candidates.sort(key=lambda x: x["rs"], reverse=True)
-top_picks = candidates[:2]
-
-ticket_blocks = []
-settrade_copy_blocks = []
-has_executable_trade = False
-
-if top_picks and risk_authorized and r_thb > 0:
-    has_executable_trade = True
-    ticket_blocks.append("📋 <b>OPTIMIZED ALPHA TICKETS (THB Sized):</b>")
-    for p in top_picks:
-        entry_usd = p["usd_price"]
-        stop_usd = p["stop_usd"]
-        ratio = p["ratio"]
-        tier = p["tier"]
-
-        entry_thb = (entry_usd * usd_thb) / ratio
-        stop_thb = (stop_usd * usd_thb) / ratio
-        risk_per_unit = entry_thb - stop_thb
-
-        if risk_per_unit <= 0.001:
-            continue
-
-        raw_units = int(r_thb / risk_per_unit)
-        raw_outlay = raw_units * entry_thb
-        max_cap = 600000.0
-        if raw_outlay > max_cap:
-            units = int(max_cap / entry_thb)
-            capped_tag = " <i>(Capped at 20% Vault B)</i>"
-        else:
-            units = raw_units
-            capped_tag = ""
-
-        if tier == "HIGH_BETA":
-            t1_multiple = 2.0
-            t1_pct = 0.50
-            t1_tag = "+2.0R Volatility Target"
-        else:
-            t1_multiple = 1.5
-            t1_pct = 0.60
-            t1_tag = "+1.5R Core Bank"
-
-        target1_thb = entry_thb + (t1_multiple * risk_per_unit)
-        t1_units = int(units * t1_pct)
-        t2_units = units - t1_units
-        stop_pct = ((stop_usd - entry_usd) / entry_usd) * 100.0
-
-        ticket_blocks.extend([
-            f"🎯 <b>{p['dr']} ({p['ticker']}) - [{tier}] (vs {p['bench']}):</b>",
-            f"  • Entry: <b>฿{entry_thb:.2f}</b> (${entry_usd:.2f})",
-            f"  • Hard Stop: <b>฿{stop_thb:.2f}</b> ({stop_pct:.1f}% pivot)",
-            f"  • Sizing: <b>{units:,} units</b> (Outlay: ฿{units*entry_thb:,.0f} THB){capped_tag}",
-            f"  • <b>T1 ({int(t1_pct*100)}% / {t1_units:,} u):</b> Limit <b>฿{target1_thb:.2f}</b> ({t1_tag} &gt;&gt; Move stop to BE)",
-            f"  • <b>T2 Runner ({int((1-t1_pct)*100)}% / {t2_units:,} u):</b> Trail Daily Close &ge; 21 EMA",
-            f"  • <b>⚡ Free-Roll Pyramiding:</b> On T1 hit, add <b>+{int(units*0.30):,} u</b> on next 15M breakout base (Stop @ BE)",
-            f"  • <b>🛡️ 4-Candle Stall Rule:</b> If 4x 15M candles stall without new highs, pull stop to <b>-0.5R (฿{entry_thb - (0.5*risk_per_unit):.2f})</b>",
-            f"  • <b>🛡️ LP Spread Guard:</b> Max Buy Limit = Offer + 1 tick. If Bid/Offer spread &gt; 0.4%, DO NOT CHASE.",
-            f"  • <b>Time-Stop:</b> Flatten if T1 unhit in 72 hours (3 sessions)",
-            ""
-        ])
-
-        settrade_copy_blocks.append(
-            f"<code>BUY {p['dr']} @ ฿{entry_thb:.2f} | Vol: {units:,} | Stop: ฿{stop_thb:.2f}</code>"
-        )
-elif circuit_breaker_active:
-    ticket_blocks.append(f"⛔ <b>CIRCUIT BREAKER TRIGGERED:</b>\n• {circuit_reason}\n• All new buy orders suppressed.")
-elif vix_elevated:
-    ticket_blocks.append(f"⚠️ <b>VOLATILITY GATE ACTIVE:</b>\n• VIX at {vix_val:.1f} (&gt; 28.0). High-beta breakouts vetoed.")
-else:
-    ticket_blocks.append("📋 <b>EXECUTION:</b> Zero breakout setups qualified. Retain cash in SCB EZ / MMF.")
-
-lines = []
-if notice_header:
-    lines.append(notice_header)
-
-title_tag = "🚨 <b>[ACTION REQUIRED: US DRx ENTRY]</b>" if has_executable_trade else "🇺🇸 <b>[C2C Engine E - Dual-Vault Briefing]</b>"
-vix_icon = "🟢" if vix_val < 20 else ("🟡" if vix_val <= 28 else "🔴 HIGH")
-
-lines.extend([
-    title_tag,
-    f"📅 <b>Time:</b> {bkk_time_str} BKK",
-    f"💵 <b>USD/THB:</b> ฿{usd_thb:.2f} | <b>VIX:</b> {vix_val:.1f} [{vix_icon}]",
-    "━━━━━━━━━━━━━━━━━━",
-    f"📊 <b>MACRO REGIME:</b> {regime_icon} <b>{regime_name}</b>",
-    f"• <b>Risk Budget:</b> <b>{r_label}</b>",
-    f"• <b>Vault A Target:</b> <code>{vault_a_alloc}</code>",
-    f"• <b>Circuit Status:</b> Streak: <b>{win_streak}W</b> | Daily Stops: <b>{state.get('daily_stopouts', 0)}/2</b>",
-    "━━━━━━━━━━━━━━━━━━",
-    "🔍 <b>WATCHPOOL METRICS (Sector-Benchmarked RS):</b>",
-    "\n".join(summary_lines) if summary_lines else "• Data pending",
-    "━━━━━━━━━━━━━━━━━━"
-])
-lines.extend(ticket_blocks)
-
-if is_friday:
-    lines.extend([
-        "━━━━━━━━━━━━━━━━━━",
-        "🛡️ <b>FRIDAY OVERNIGHT COLLAR DIRECTIVE:</b>",
-        "• If T1 is not banked before market close, tighten stop to BE or flatten to eliminate unhedged weekend gap risk.",
-        "• If Net Long Exposure &gt; ฿1.5M and VIX &gt; 22, park hedge tranche in SGOV."
-    ])
-
-if settrade_copy_blocks:
-    lines.append("━━━━━━━━━━━━━━━━━━\n📲 <b>SETTRADE QUICK-PASTE:</b>")
-    lines.extend(settrade_copy_blocks)
-
-lines.append("━━━━━━━━━━━━━━━━━━\n<i>Automated pipeline running via GitHub Cloud.</i>")
-full_msg = "\n".join(lines)
-
-keyboard_buttons = [
-    [
-        {"text": "📲 Open InnovestX", "url": "https://play.google.com/store/apps/details?id=com.scbs.easyinvest"}
-    ]
-]
-
-if top_picks:
-    for p in top_picks:
-        sym = p["ticker"]
-        exch = p.get("exchange", "NASDAQ")
-        tv_chart_url = f"https://www.tradingview.com/chart/?symbol={exch}%3A{sym}"
-        keyboard_buttons.append([
-            {"text": f"📈 {sym} Chart", "url": tv_chart_url}
-        ])
-else:
-    keyboard_buttons.append([
-        {"text": "📈 QQQ Chart", "url": "https://www.tradingview.com/chart/?symbol=NASDAQ%3AQQQ"}
-    ])
-
-keyboard = {"inline_keyboard": keyboard_buttons}
-
-if token and chat_id:
-    res = requests.post(
-        f"https://api.telegram.org/bot{token}/sendMessage",
-        json={
-            "chat_id": chat_id,
-            "text": full_msg,
-            "parse_mode": "HTML",
-            "disable_notification": False,
-            "reply_markup": keyboard
-        },
-        timeout=15
-    )
-    print(f"Telegram status: {res.status_code}")
-    if res.status_code != 200:
-        print(f"Telegram error response: {res.text}")
-        clean_plain = (
-            full_msg.replace("<b>", "")
-            .replace("</b>", "")
-            .replace("<code>", "")
-            .replace("</code>", "")
-            .replace("<i>", "")
-            .replace("</i>", "")
-            .replace("&gt;", ">")
-            .replace("&lt;", "<")
-        )
-        res_fb = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": clean_plain,
-                "disable_notification": False,
-                "reply_markup": keyboard
-            },
-            timeout=15
-        )
-        print(f"Fallback plain text status: {res_fb.status_code}")
-else:
-    print("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
+                "ratio":
