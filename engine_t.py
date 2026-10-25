@@ -1,383 +1,179 @@
 import os
 import sys
+import json
+import html
 import requests
 from datetime import datetime
 import pytz
-import exchange_calendars as xcals
-import yfinance as yf
 import pandas as pd
 import numpy as np
+import yfinance as yf
 
 token = os.environ.get("TELEGRAM_BOT_TOKEN")
 chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-event_name = os.environ.get("EVENT_NAME", "workflow_dispatch")
 bkk_now = datetime.now(pytz.timezone("Asia/Bangkok"))
-bkk_date_str = bkk_now.strftime("%Y-%m-%d")
 bkk_time_str = bkk_now.strftime("%Y-%m-%d %H:%M:%S")
+is_friday = (bkk_now.weekday() == 4)
 
-# 0. SET / TFEX Market Calendar Check
-xbkk = xcals.get_calendar("XBKK")
-is_market_open_today = xbkk.is_session(bkk_date_str)
+# 1. State Machine Load & Validation
+state_file = "state.json"
+default_state = {
+    "engine_t": {
+        "status": "FLAT",               # FLAT, ACTIVE_INITIAL, T1_BANKED_BE, PYRAMIDED
+        "direction": None,             # BUY or SELL
+        "entry_price": 0.0,
+        "current_stop": 0.0,
+        "initial_stop": 0.0,
+        "t1_target": 0.0,
+        "contracts_open": 0,
+        "t1_banked_pts": 0.0,
+        "pyramid_eligible": False,
+        "last_update": bkk_time_str
+    },
+    "circuit_breakers": {
+        "daily_stopouts": 0,
+        "weekly_stopouts": 0,
+        "date": bkk_now.strftime("%Y-%m-%d")
+    }
+}
 
-if not is_market_open_today and event_name == "schedule":
-    msg = (
-        f"⏸️ <b>[C2C Engine T - Market Closed]</b>\n"
-        f"📅 <b>Date:</b> {bkk_date_str} (BKK)\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"• <b>Status:</b> SET / TFEX is closed today (Holiday/Weekend).\n"
-        f"• <b>Action:</b> Standing down. No scan executed.\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Automated pipeline running via GitHub Cloud.</i>"
-    )
-    if token and chat_id:
-        requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML", "disable_notification": True},
-            timeout=15
-        )
-    sys.exit(0)
-
-notice_header = ""
-if not is_market_open_today:
-    notice_header = "⚠️ <b>[TEST MODE: SET Closed Today - Using Prior Session Data]</b>\n"
-
-def safe_get_series(ticker, period="5d", interval="1d"):
+state = default_state
+if os.path.exists(state_file):
     try:
-        df = yf.download(ticker, period=period, interval=interval, progress=False)
-        if df is not None and not df.empty:
-            if isinstance(df.columns, pd.MultiIndex):
-                return df["Close"].iloc[:, 0].dropna().values
-            return df["Close"].dropna().values
+        with open(state_file, "r") as f:
+            state = json.load(f)
+            if "engine_t" not in state:
+                state["engine_t"] = default_state["engine_t"]
     except Exception as e:
-        print(f"Warning {ticker}: {e}")
-    return np.array([])
+        print(f"State load note: {e}")
 
-# 1. Asian E-mini S&P (ES=F)
-es_pct = 0.0
-c_es = safe_get_series("ES=F", "5d", "1d")
-if len(c_es) >= 2:
-    es_pct = float(((c_es[-1] - c_es[-2]) / c_es[-2]) * 100.0)
+# Circuit breaker daily reset
+if state.get("circuit_breakers", {}).get("date") != bkk_now.strftime("%Y-%m-%d"):
+    state["circuit_breakers"]["daily_stopouts"] = 0
+    state["circuit_breakers"]["date"] = bkk_now.strftime("%Y-%m-%d")
 
-long_es_pass = (es_pct > -0.60)
-short_es_pass = (es_pct < 0.60)
+# 2. Market Feeds: SET50, DELTA Decoupler & Top 5 Breadth
+delta_pct = 0.0
+s50_price = 0.0
 
-# 2. USD/THB FX Gate
-thb_chg = 0.0
-c_thb = safe_get_series("THB=X", "10d", "1d")
-if len(c_thb) >= 5:
-    thb_chg = float(((c_thb[-1] - c_thb[-5]) / c_thb[-5]) * 100.0)
-
-long_thb_pass = (thb_chg <= 0.30)
-short_thb_pass = True
-
-# 3. Breadth & DELTA Decoupler
-tickers = ["DELTA.BK", "PTT.BK", "PTTEP.BK", "BDMS.BK", "CPALL.BK"]
-advancing = 0
-declining = 0
-breadth_details = []
-delta_chg = 0.0
-
-for t in tickers:
-    clean = t.replace(".BK", "")
-    c_t = safe_get_series(t, "5d", "1d")
-    if len(c_t) >= 2:
-        chg = float(((c_t[-1] - c_t[-2]) / c_t[-2]) * 100.0)
-        if clean == "DELTA":
-            delta_chg = chg
-        if chg > 0:
-            advancing += 1
-            breadth_details.append(f"🟢 {clean}: {chg:+.2f}%")
-        elif chg < 0:
-            declining += 1
-            breadth_details.append(f"🔴 {clean}: {chg:+.2f}%")
-        else:
-            breadth_details.append(f"⚪ {clean}: 0.00%")
-    else:
-        breadth_details.append(f"⚪ {clean}: Flat")
-
-long_breadth_pass = (advancing >= 3)
-short_breadth_pass = (declining >= 3)
-long_delta_pass = (delta_chg >= -1.50)
-short_delta_pass = (delta_chg <= 1.50)
-
-# 4. Multi-Timeframe Structure & Playbook Layer Calculations
-s50_price = 930.0
-s50_daily_ema20 = 925.0
-s50_15m_ema20 = 928.0
-s50_rsi15m = 50.0
-s50_atr = 4.5
-daily_adx = 22.0
-plus_di = 25.0
-minus_di = 20.0
-daily_bullish = True
-daily_bearish = False
-mss_15m_long = False
-mss_15m_short = False
-prior_vah = 928.0
-prior_val = 920.0
-prev_day_close = 924.0
-
-# Layer A: Daily Trend, ATR, & ADX Filter
 try:
-    df_d = yf.download("^SET50", period="6mo", interval="1d", progress=False)
-    if df_d is not None and not df_d.empty:
-        c_series = df_d["Close"].iloc[:, 0] if isinstance(df_d.columns, pd.MultiIndex) else df_d["Close"]
-        h_series = df_d["High"].iloc[:, 0] if isinstance(df_d.columns, pd.MultiIndex) else df_d["High"]
-        l_series = df_d["Low"].iloc[:, 0] if isinstance(df_d.columns, pd.MultiIndex) else df_d["Low"]
-
-        c_vals = c_series.dropna().values
-        h_vals = h_series.dropna().values
-        l_vals = l_series.dropna().values
-
-        if len(c_vals) >= 30:
-            s50_price = float(c_vals[-1])
-            prev_day_close = float(c_vals[-2]) if len(c_vals) >= 2 else s50_price
-            ema_series = pd.Series(c_vals).ewm(span=20, adjust=False).mean()
-            s50_daily_ema20 = float(ema_series.iloc[-1])
-            daily_bullish = s50_price >= s50_daily_ema20
-            daily_bearish = s50_price < s50_daily_ema20
-
-            if len(h_vals) >= 2:
-                prev_h = h_vals[-2]
-                prev_l = l_vals[-2]
-                prev_rng = prev_h - prev_l
-                prior_vah = prev_h - (prev_rng * 0.15)
-                prior_val = prev_l + (prev_rng * 0.15)
-
-            tr_list = []
-            for k in range(1, len(c_vals)):
-                tr_val = max(h_vals[k] - l_vals[k], abs(h_vals[k] - c_vals[k-1]), abs(l_vals[k] - c_vals[k-1]))
-                tr_list.append(tr_val)
-            if len(tr_list) >= 14:
-                s50_atr = max(float(np.mean(tr_list[-14:])), 3.5)
-
-            df_adx = pd.DataFrame({"High": h_vals, "Low": l_vals, "Close": c_vals})
-            up = df_adx["High"].diff()
-            down = -df_adx["Low"].diff()
-            p_dm = np.where((up > down) & (up > 0), up, 0.0)
-            m_dm = np.where((down > up) & (down > 0), down, 0.0)
-            tr_s = pd.Series(tr_list)
-            p_di_s = 100.0 * (pd.Series(p_dm[1:]).rolling(14).sum() / (tr_s.rolling(14).sum() + 1e-9))
-            m_di_s = 100.0 * (pd.Series(m_dm[1:]).rolling(14).sum() / (tr_s.rolling(14).sum() + 1e-9))
-            dx_s = 100.0 * ((p_di_s - m_di_s).abs() / ((p_di_s + m_di_s).abs() + 1e-9))
-            adx_val = dx_s.rolling(14).mean().iloc[-1]
-            if not np.isnan(adx_val):
-                daily_adx = float(adx_val)
-                plus_di = float(p_di_s.iloc[-1])
-                minus_di = float(m_di_s.iloc[-1])
-except Exception as e:
-    print(f"Daily/ADX calculation error: {e}")
-
-# Layer B & C: 15M MSS Trigger & Zone of Interest (ZOI)
-try:
-    df_15m = yf.download("^SET50", period="5d", interval="15m", progress=False)
-    if df_15m is not None and not df_15m.empty:
-        c_15m = df_15m["Close"].iloc[:, 0].dropna() if isinstance(df_15m.columns, pd.MultiIndex) else df_15m["Close"].dropna()
-        if len(c_15m) >= 25:
-            s50_price = float(c_15m.iloc[-1])
-            ema20_15m_series = c_15m.ewm(span=20, adjust=False).mean()
-            s50_15m_ema20 = float(ema20_15m_series.iloc[-1])
-
-            delta_p = c_15m.diff()
-            gain = (delta_p.where(delta_p > 0, 0)).rolling(14).mean()
-            loss = (-delta_p.where(delta_p < 0, 0)).rolling(14).mean()
-            rs = gain / (loss + 1e-9)
-            s50_rsi15m = float((100 - (100 / (1 + rs))).iloc[-1])
-
-            mss_15m_long = (s50_price >= s50_15m_ema20) and (s50_rsi15m >= 50.0)
-            mss_15m_short = (s50_price <= s50_15m_ema20) and (s50_rsi15m <= 48.0)
-except Exception as e:
-    print(f"15M calculation error: {e}")
-
-# Layer D: Futures Basis Clamping
-basis_delta = 0.5
-try:
-    c_fut = safe_get_series("0840.HK", "5d", "1d")
-    if len(c_fut) >= 2:
-        diff = float(c_fut[-1] - s50_price)
-        if abs(diff) < 25.0:
-            basis_delta = diff
+    s50_df = yf.download("^SET50", period="1mo", interval="1d", progress=False)
+    if s50_df is not None and not s50_df.empty:
+        c = s50_df["Close"].iloc[:, 0].dropna() if isinstance(s50_df.columns, pd.MultiIndex) else s50_df["Close"].dropna()
+        if len(c) > 0:
+            s50_price = float(c.iloc[-1])
 except Exception:
-    basis_delta = 0.5
+    pass
 
-basis_pass_long = (basis_delta < 5.5)
-basis_pass_short = (basis_delta > -3.5)
+try:
+    delta_df = yf.download("DELTA.BK", period="1mo", interval="1d", progress=False)
+    if delta_df is not None and not delta_df.empty:
+        c_del = delta_df["Close"].iloc[:, 0].dropna() if isinstance(delta_df.columns, pd.MultiIndex) else delta_df["Close"].dropna()
+        if len(c_del) >= 2:
+            delta_pct = ((float(c_del.iloc[-1]) - float(c_del.iloc[-2])) / float(c_del.iloc[-2])) * 100.0
+except Exception:
+    pass
 
-va_pass_long = (s50_price >= prior_vah)
-va_pass_short = (s50_price <= prior_val)
-zoi_pass = abs(s50_price - s50_daily_ema20) <= (s50_atr * 0.75)
-adx_pass = (daily_adx >= 20.0)
+# 3. Process State Machine & Breakeven Ratchets
+t_state = state["engine_t"]
+status = t_state.get("status", "FLAT")
+alert_lines = []
 
-# OPTIMIZED ALPHA VECTOR 1: Auction Gap Reclaim Detection (09:45 - 10:15 BKK)
-is_auction_hour = (bkk_now.hour == 9 and bkk_now.minute >= 45) or (bkk_now.hour == 10 and bkk_now.minute <= 15)
-auction_reclaim_long = is_auction_hour and (s50_price < prior_val) and (s50_price > prev_day_close - 2.5) and (s50_rsi15m >= 45.0)
-auction_reclaim_short = is_auction_hour and (s50_price > prior_vah) and (s50_price < prev_day_close + 2.5) and (s50_rsi15m <= 55.0)
+if status != "FLAT" and s50_price > 0:
+    entry = t_state["entry_price"]
+    direction = t_state["direction"]
+    t1 = t_state["t1_target"]
+    stop = t_state["current_stop"]
+    
+    # Check T1 Bank Target
+    if status == "ACTIVE_INITIAL":
+        t1_hit = (s50_price >= t1) if direction == "BUY" else (s50_price <= t1)
+        if t1_hit:
+            t_state["status"] = "T1_BANKED_BE"
+            t_state["current_stop"] = entry  # Move stop to exact breakeven
+            t_state["contracts_open"] -= 4   # Bank 4 contracts
+            pts_banked = abs(t1 - entry)
+            t_state["t1_banked_pts"] = pts_banked
+            t_state["pyramid_eligible"] = True
+            
+            alert_lines.append(f"🎯 <b>[TRANCHE 1 BANKED: +{pts_banked:.1f} PTS]</b>")
+            alert_lines.append("• <b>Remaining 6 Contracts:</b> Stop pulled to Breakeven (0.0 pt).")
+            alert_lines.append("• <b>Pyramiding Status:</b> 🟢 AUTHORIZED (+2 contracts on secondary base).")
 
-# Main Institutional Rules
-is_long_authorized = (
-    long_es_pass and long_thb_pass and long_breadth_pass and long_delta_pass and
-    daily_bullish and mss_15m_long and basis_pass_long and adx_pass and
-    (plus_di > minus_di) and va_pass_long and zoi_pass
+    # Check Stop Loss
+    stop_hit = (s50_price <= stop) if direction == "BUY" else (s50_price >= stop)
+    if stop_hit:
+        loss_pts = abs(entry - stop) if status == "ACTIVE_INITIAL" else 0.0
+        t_state["status"] = "FLAT"
+        t_state["contracts_open"] = 0
+        t_state["pyramid_eligible"] = False
+        
+        if status == "ACTIVE_INITIAL":
+            state["circuit_breakers"]["daily_stopouts"] += 1
+            state["circuit_breakers"]["weekly_stopouts"] += 1
+            alert_lines.append(f"🛑 <b>[STOP-OUT HIT: -{loss_pts:.1f} PTS]</b>")
+        else:
+            alert_lines.append("🛡️ <b>[BREAKEVEN EXIT]</b> Tranche 2 stopped at 0.0 pt. Zero principal loss.")
+
+# Friday 16:15 Flatten Directive Check
+friday_flatten_warning = ""
+if is_friday and bkk_now.hour >= 16 and status == "ACTIVE_INITIAL":
+    friday_flatten_warning = (
+        "⚠️ <b>[FRIDAY 16:15 FLATTEN HOOK]</b>\n"
+        "• Tranche 1 has not banked before session close.\n"
+        "• Playbook Rule: <b>Flatten all open contracts before 16:30 BKK</b> to eliminate unhedged weekend gap risk."
+    )
+
+# 4. Save Persistent State Machine
+t_state["last_update"] = bkk_time_str
+state["engine_t"] = t_state
+try:
+    with open(state_file, "w") as f:
+        json.dump(state, f, indent=2)
+except Exception as e:
+    print(f"Error saving state: {e}")
+
+# 5. Build Telegram Status Card
+delta_flag = "⚠️ DECOUPLED" if abs(delta_pct) >= 1.5 else "✅ Normal"
+msg = (
+    "🇹🇭 <b>[C2C ENGINE T: S50 TACTICAL MONITOR]</b>\n"
+    f"📅 <b>Time:</b> <code>{html.escape(bkk_time_str)} BKK</code>\n"
+    "━━━━━━━━━━━━━━━━━━\n"
+    f"• <b>SET50 Level:</b> <code>{s50_price:.2f} pts</code>\n"
+    f"• <b>DELTA Movement:</b> <code>{delta_pct:+.2f}%</code> ({delta_flag})\n"
+    f"• <b>Active State:</b> <b>{html.escape(t_state['status'])}</b>\n"
+    f"• <b>Open Contracts:</b> <code>{t_state['contracts_open']}</code> | "
+    f"<b>Direction:</b> <code>{html.escape(str(t_state['direction']))}</code>\n"
+    f"• <b>Active Stop:</b> <code>{t_state['current_stop']:.1f}</code> | "
+    f"<b>Pyramid Eligible:</b> {'🟢 YES' if t_state['pyramid_eligible'] else '⚪ NO'}\n"
+    "━━━━━━━━━━━━━━━━━━\n"
 )
 
-is_short_authorized = (
-    short_es_pass and short_thb_pass and short_breadth_pass and short_delta_pass and
-    daily_bearish and mss_15m_short and basis_pass_short and adx_pass and
-    (minus_di > plus_di) and va_pass_short and zoi_pass
+if alert_lines:
+    msg += "\n".join(alert_lines) + "\n━━━━━━━━━━━━━━━━━━\n"
+
+if friday_flatten_warning:
+    msg += friday_flatten_warning + "\n━━━━━━━━━━━━━━━━━━\n"
+
+msg += (
+    f"🛡️ <b>Circuit Breakers:</b> Daily: <code>{state['circuit_breakers']['daily_stopouts']}/2</code> | "
+    f"Weekly: <code>{state['circuit_breakers']['weekly_stopouts']}/3</code>\n"
+    "<i>Code2Cash Institutional Engine v7</i>"
 )
-
-has_actionable_signal = is_long_authorized or is_short_authorized or auction_reclaim_long or auction_reclaim_short
-is_silent = not has_actionable_signal
-
-trend_icon = "🟢 BULL" if daily_bullish else "🔴 BEAR"
-adx_icon = "🟢 TRENDING" if daily_adx >= 20.0 else "🟡 CHOP/FLAT"
-mss_icon = "🟢 BULL MSS" if mss_15m_long else ("🔴 BEAR MSS" if mss_15m_short else "⚪ NEUTRAL")
-basis_icon = "🟢 NORMAL" if (-3.5 < basis_delta < 5.5) else ("🔴 HIGH PREMIUM" if basis_delta >= 5.5 else "🔴 DEEP DISCOUNT")
-
-lines = []
-if notice_header:
-    lines.append(notice_header)
-
-if is_long_authorized:
-    title_tag = "🚨 <b>[ACTION REQUIRED: TFEX S50 LONG]</b>"
-elif is_short_authorized:
-    title_tag = "🚨 <b>[ACTION REQUIRED: TFEX S50 SHORT]</b>"
-elif auction_reclaim_long or auction_reclaim_short:
-    title_tag = "⚡ <b>[ALPHA VECTOR: AUCTION GAP RECLAIM]</b>"
-else:
-    title_tag = "⚡ <b>[C2C Engine T - Market Scan]</b>"
-
-lines.extend([
-    title_tag,
-    f"📅 <b>Time:</b> {bkk_time_str} BKK",
-    "━━━━━━━━━━━━━━━━━━",
-    f"📈 <b>SET50 Index:</b> {s50_price:.2f} pts [{trend_icon}]",
-    f"• Daily EMA(20): {s50_daily_ema20:.2f} | 15M EMA(20): {s50_15m_ema20:.2f}",
-    f"• ADX(14): {daily_adx:.1f} [{adx_icon}] | 15M RSI: {s50_rsi15m:.1f} [{mss_icon}]",
-    f"• Value Area: VAH {prior_vah:.1f} / VAL {prior_val:.1f} | Basis: {basis_delta:+.1f} pts [{basis_icon}]",
-    "━━━━━━━━━━━━━━━━━━",
-    "🛡️ <b>INSTITUTIONAL GATE MATRIX:</b>",
-    f"• <b>Intermarket (ES=F):</b> {es_pct:+.2f}%",
-    f"• <b>FX Slope (USD/THB):</b> {thb_chg:+.2f}%",
-    f"• <b>Mega-Cap Breadth:</b> {advancing} Adv / {declining} Dec",
-    f"• <b>DELTA Movement:</b> {delta_chg:+.2f}%",
-    "  " + " | ".join(breadth_details),
-    "━━━━━━━━━━━━━━━━━━"
-])
-
-# Master Plan Asymmetric Targets
-long_t1 = round(s50_price + max(5.5, s50_atr * 1.25), 1)
-short_t1 = round(s50_price - 4.5, 1)
-long_t2a = round(s50_price + 12.0, 1)
-short_t2a = round(s50_price - 14.0, 1)
-stop_distance = round(min(s50_atr * 0.75, 4.5), 1)
-
-if is_long_authorized:
-    lines.extend([
-        "🎯 <b>REGIME STATUS: GREEN (LONG AUTHORIZED)</b>",
-        "📋 <b>INSTITUTIONAL MASTER TICKET (10 Contracts Baseline):</b>",
-        f"• Sizing: <b>10 Contracts</b> (Streak 2: 12 cts | Streak 3+: 14 cts)",
-        f"• Limit Entry: <b>{s50_price:.1f}</b> (In ZOI)",
-        f"• Hard Stop: <b>{s50_price - stop_distance:.1f}</b> (-{stop_distance} pts structural cap)",
-        f"• <b>Tranche 1 (Bank 4 cts):</b> Limit <b>{long_t1:.1f}</b> (+{long_t1-s50_price:.1f} pts &gt;&gt; Move stop to BE)",
-        f"• <b>Tranche 2A (Fixed 3 cts):</b> Limit <b>{long_t2a:.1f}</b> (+12.0 pts)",
-        f"• <b>Tranche 2B (Macro Runner 3 cts):</b> Trailed to <b>Daily EMA(20) [{s50_daily_ema20:.1f}]</b> (+25 to +35 pts expansion)",
-        "━━━━━━━━━━━━━━━━━━",
-        "🔥 <b>HOUSE MONEY PYRAMID TICKET (+2 Contracts):</b>",
-        f"• Trigger: After T1 banks (+{long_t1-s50_price:.1f} pts), place <b>BUY OPEN +2 cts</b> on next 15M breakout.",
-        f"• Anchor Stop: <b>{s50_price:.1f}</b> (Breakeven). 100% financed by T1 banked profit.",
-        "━━━━━━━━━━━━━━━━━━",
-        "📲 <b>QUICK ORDER:</b>",
-        f"<code>BUY OPEN S50 10 cts @ {s50_price:.1f} | Stop: {s50_price - stop_distance:.1f}</code>"
-    ])
-elif is_short_authorized:
-    lines.extend([
-        "🎯 <b>REGIME STATUS: RED (SHORT AUTHORIZED)</b>",
-        "📋 <b>INSTITUTIONAL MASTER TICKET (10 Contracts Baseline):</b>",
-        f"• Sizing: <b>10 Contracts</b> (Streak 2: 12 cts | Streak 3+: 14 cts)",
-        f"• Limit Entry: <b>{s50_price:.1f}</b> (In ZOI)",
-        f"• Hard Stop: <b>{s50_price + stop_distance:.1f}</b> (+{stop_distance} pts structural cap)",
-        f"• <b>Tranche 1 (Bank 4 cts):</b> Limit <b>{short_t1:.1f}</b> (-4.5 pts &gt;&gt; Move stop to BE)",
-        f"• <b>Tranche 2A (Fixed 3 cts):</b> Limit <b>{short_t2a:.1f}</b> (-14.0 pts extended impulse)",
-        f"• <b>Tranche 2B (Macro Runner 3 cts):</b> Trailed to <b>Daily EMA(20) [{s50_daily_ema20:.1f}]</b> (-25 to -35 pts expansion)",
-        "━━━━━━━━━━━━━━━━━━",
-        "🔥 <b>HOUSE MONEY PYRAMID TICKET (+2 Contracts):</b>",
-        f"• Trigger: After T1 banks (-4.5 pts), place <b>SELL OPEN +2 cts</b> on next 15M breakdown.",
-        f"• Anchor Stop: <b>{s50_price:.1f}</b> (Breakeven). 100% financed by T1 banked profit.",
-        "━━━━━━━━━━━━━━━━━━",
-        "📲 <b>QUICK ORDER:</b>",
-        f"<code>SELL OPEN S50 10 cts @ {s50_price:.1f} | Stop: {s50_price + stop_distance:.1f}</code>"
-    ])
-elif auction_reclaim_long:
-    lines.extend([
-        "⚡ <b>ALPHA VECTOR: OPENING AUCTION RECLAIM (LONG)</b>",
-        "📋 <b>TACTICAL SCALP TICKET (4 Contracts):</b>",
-        f"• Trigger: Opening auction sweep flushed below VAL ({prior_val:.1f}) & reclaimed.",
-        f"• Limit Entry: <b>{s50_price:.1f}</b>",
-        f"• Tight Stop: <b>{s50_price - 1.8:.1f}</b> (-1.8 pts hard stop)",
-        f"• Profit Target: <b>{s50_price + 3.0:.1f}</b> (+3.0 pts fair value reversion)",
-        "━━━━━━━━━━━━━━━━━━",
-        "📲 <b>QUICK ORDER:</b>",
-        f"<code>BUY OPEN S50 4 cts @ {s50_price:.1f} | Stop: {s50_price - 1.8:.1f}</code>"
-    ])
-elif auction_reclaim_short:
-    lines.extend([
-        "⚡ <b>ALPHA VECTOR: OPENING AUCTION RECLAIM (SHORT)</b>",
-        "📋 <b>TACTICAL SCALP TICKET (4 Contracts):</b>",
-        f"• Trigger: Opening auction sweep squeezed above VAH ({prior_vah:.1f}) & rejected.",
-        f"• Limit Entry: <b>{s50_price:.1f}</b>",
-        f"• Tight Stop: <b>{s50_price + 1.8:.1f}</b> (+1.8 pts hard stop)",
-        f"• Profit Target: <b>{s50_price - 3.0:.1f}</b> (-3.0 pts fair value reversion)",
-        "━━━━━━━━━━━━━━━━━━",
-        "📲 <b>QUICK ORDER:</b>",
-        f"<code>SELL OPEN S50 4 cts @ {s50_price:.1f} | Stop: {s50_price + 1.8:.1f}</code>"
-    ])
-else:
-    reasons = []
-    if not zoi_pass: reasons.append("Extended Beyond ZOI (No Chasing)")
-    if not (long_delta_pass and short_delta_pass): reasons.append(f"DELTA Decoupler Bias ({delta_chg:+.2f}%)")
-    if not (mss_15m_long or mss_15m_short): reasons.append("15M MSS Neutral")
-    if not adx_pass: reasons.append(f"ADX &lt; 20 ({daily_adx:.1f} Low Momentum)")
-    if not (va_pass_long or va_pass_short): reasons.append("Inside Prior Value Area (Chop)")
-    if not basis_pass_long and not basis_pass_short: reasons.append("Futures Basis Clamped")
-    if not (long_breadth_pass or short_breadth_pass): reasons.append("Mega-Cap Breadth Split")
-
-    lines.extend([
-        "⚠️ <b>REGIME STATUS: FILTER VETO ACTIVE</b>",
-        f"• <b>Reason:</b> {', '.join(reasons)}",
-        "• <b>Action:</b> Stand down. Zero edge. <i>(Silent notification)</i>"
-    ])
-
-# Treasury Yield Stacking Footer
-lines.extend([
-    "━━━━━━━━━━━━━━━━━━",
-    "🏦 <b>TREASURY STACK:</b> ฿700k Unencumbered in MMF/EZ (~+฿1,150/mo yield)",
-    "<i>Automated pipeline running via GitHub Cloud.</i>"
-])
-
-full_msg = "\n".join(lines)
 
 keyboard = {
     "inline_keyboard": [
         [
-            {"text": "📈 S50 Futures Chart", "url": "https://www.tradingview.com/chart/?symbol=TFEX%3AS501!"},
-            {"text": "📲 Open InnovestX", "url": "https://play.google.com/store/apps/details?id=com.scbs.easyinvest"}
+            {"text": "📲 Open InnovestX", "url": "https://play.google.com/store/apps/details?id=com.scbs.easyinvest"},
+            {"text": "📈 TradingView S50", "url": "https://www.tradingview.com/chart/?symbol=TFEX%3AS501!"}
         ]
     ]
 }
 
 if token and chat_id:
-    res = requests.post(
+    requests.post(
         f"https://api.telegram.org/bot{token}/sendMessage",
-        json={
-            "chat_id": chat_id,
-            "text": full_msg,
-            "parse_mode": "HTML",
-            "disable_notification": is_silent,
-            "reply_markup": keyboard
-        },
+        json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML", "reply_markup": keyboard},
         timeout=15
     )
-    print(f"Telegram status: {res.status_code}")
-else:
-    print("Missing Telegram credentials.")
+    print("Engine T execution cycle completed.")
