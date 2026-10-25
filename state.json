@@ -3,5 +3,22 @@
   "daily_stopouts": 0,
   "weekly_stopouts": 0,
   "last_trade_date": "2026-10-25",
-  "active_position": null
+  "active_position": null,
+  "circuit_breakers": {
+    "daily_stopouts": 0,
+    "weekly_stopouts": 0,
+    "date": "2026-10-26"
+  },
+  "engine_t": {
+    "status": "FLAT",
+    "direction": null,
+    "entry_price": 0.0,
+    "current_stop": 0.0,
+    "initial_stop": 0.0,
+    "t1_target": 0.0,
+    "contracts_open": 0,
+    "t1_banked_pts": 0.0,
+    "pyramid_eligible": false,
+    "last_update": "2026-10-26 01:06:19"
+  }
 }
