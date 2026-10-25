@@ -115,6 +115,7 @@ mss_15m_long = False
 mss_15m_short = False
 prior_vah = 928.0
 prior_val = 920.0
+prev_day_close = 924.0
 
 # Layer A: Daily Trend, ATR, & ADX Filter
 try:
@@ -130,6 +131,7 @@ try:
 
         if len(c_vals) >= 30:
             s50_price = float(c_vals[-1])
+            prev_day_close = float(c_vals[-2]) if len(c_vals) >= 2 else s50_price
             ema_series = pd.Series(c_vals).ewm(span=20, adjust=False).mean()
             s50_daily_ema20 = float(ema_series.iloc[-1])
             daily_bullish = s50_price >= s50_daily_ema20
@@ -206,6 +208,12 @@ va_pass_short = (s50_price <= prior_val)
 zoi_pass = abs(s50_price - s50_daily_ema20) <= (s50_atr * 0.75)
 adx_pass = (daily_adx >= 20.0)
 
+# OPTIMIZED ALPHA VECTOR 1: Auction Gap Reclaim Detection (09:45 - 10:15 BKK)
+is_auction_hour = (bkk_now.hour == 9 and bkk_now.minute >= 45) or (bkk_now.hour == 10 and bkk_now.minute <= 15)
+auction_reclaim_long = is_auction_hour and (s50_price < prior_val) and (s50_price > prev_day_close - 2.5) and (s50_rsi15m >= 45.0)
+auction_reclaim_short = is_auction_hour and (s50_price > prior_vah) and (s50_price < prev_day_close + 2.5) and (s50_rsi15m <= 55.0)
+
+# Main Institutional Rules
 is_long_authorized = (
     long_es_pass and long_thb_pass and long_breadth_pass and long_delta_pass and
     daily_bullish and mss_15m_long and basis_pass_long and adx_pass and
@@ -218,7 +226,7 @@ is_short_authorized = (
     (minus_di > plus_di) and va_pass_short and zoi_pass
 )
 
-has_actionable_signal = is_long_authorized or is_short_authorized
+has_actionable_signal = is_long_authorized or is_short_authorized or auction_reclaim_long or auction_reclaim_short
 is_silent = not has_actionable_signal
 
 trend_icon = "🟢 BULL" if daily_bullish else "🔴 BEAR"
@@ -234,6 +242,8 @@ if is_long_authorized:
     title_tag = "🚨 <b>[ACTION REQUIRED: TFEX S50 LONG]</b>"
 elif is_short_authorized:
     title_tag = "🚨 <b>[ACTION REQUIRED: TFEX S50 SHORT]</b>"
+elif auction_reclaim_long or auction_reclaim_short:
+    title_tag = "⚡ <b>[ALPHA VECTOR: AUCTION GAP RECLAIM]</b>"
 else:
     title_tag = "⚡ <b>[C2C Engine T - Market Scan]</b>"
 
@@ -255,24 +265,23 @@ lines.extend([
     "━━━━━━━━━━━━━━━━━━"
 ])
 
+# Master Plan Asymmetric Targets
 long_t1 = round(s50_price + max(5.5, s50_atr * 1.25), 1)
 short_t1 = round(s50_price - 4.5, 1)
 long_t2a = round(s50_price + 12.0, 1)
 short_t2a = round(s50_price - 14.0, 1)
-chandelier_long = round(s50_price - (1.5 * s50_atr), 1)
-chandelier_short = round(s50_price + (1.5 * s50_atr), 1)
 stop_distance = round(min(s50_atr * 0.75, 4.5), 1)
 
 if is_long_authorized:
     lines.extend([
         "🎯 <b>REGIME STATUS: GREEN (LONG AUTHORIZED)</b>",
-        "📋 <b>INSTITUTIONAL MASTER TICKET (10 Contracts):</b>",
-        f"• Order: <b>BUY OPEN 10 Contracts</b> (฿1.0M Baseline)",
+        "📋 <b>INSTITUTIONAL MASTER TICKET (10 Contracts Baseline):</b>",
+        f"• Sizing: <b>10 Contracts</b> (Streak 2: 12 cts | Streak 3+: 14 cts)",
         f"• Limit Entry: <b>{s50_price:.1f}</b> (In ZOI)",
-        f"• Hard Stop: <b>{s50_price - stop_distance:.1f}</b> (-{stop_distance} pts cap)",
+        f"• Hard Stop: <b>{s50_price - stop_distance:.1f}</b> (-{stop_distance} pts structural cap)",
         f"• <b>Tranche 1 (Bank 4 cts):</b> Limit <b>{long_t1:.1f}</b> (+{long_t1-s50_price:.1f} pts &gt;&gt; Move stop to BE)",
         f"• <b>Tranche 2A (Fixed 3 cts):</b> Limit <b>{long_t2a:.1f}</b> (+12.0 pts)",
-        f"• <b>Tranche 2B (Runner 3 cts):</b> Chandelier Trail &gt;&gt; High - {1.5*s50_atr:.1f} pts (Initial: <b>{chandelier_long:.1f}</b>)",
+        f"• <b>Tranche 2B (Macro Runner 3 cts):</b> Trailed to <b>Daily EMA(20) [{s50_daily_ema20:.1f}]</b> (+25 to +35 pts expansion)",
         "━━━━━━━━━━━━━━━━━━",
         "🔥 <b>HOUSE MONEY PYRAMID TICKET (+2 Contracts):</b>",
         f"• Trigger: After T1 banks (+{long_t1-s50_price:.1f} pts), place <b>BUY OPEN +2 cts</b> on next 15M breakout.",
@@ -284,13 +293,13 @@ if is_long_authorized:
 elif is_short_authorized:
     lines.extend([
         "🎯 <b>REGIME STATUS: RED (SHORT AUTHORIZED)</b>",
-        "📋 <b>INSTITUTIONAL MASTER TICKET (10 Contracts):</b>",
-        f"• Order: <b>SELL OPEN (SHORT) 10 Contracts</b> (฿1.0M Baseline)",
+        "📋 <b>INSTITUTIONAL MASTER TICKET (10 Contracts Baseline):</b>",
+        f"• Sizing: <b>10 Contracts</b> (Streak 2: 12 cts | Streak 3+: 14 cts)",
         f"• Limit Entry: <b>{s50_price:.1f}</b> (In ZOI)",
-        f"• Hard Stop: <b>{s50_price + stop_distance:.1f}</b> (+{stop_distance} pts cap)",
+        f"• Hard Stop: <b>{s50_price + stop_distance:.1f}</b> (+{stop_distance} pts structural cap)",
         f"• <b>Tranche 1 (Bank 4 cts):</b> Limit <b>{short_t1:.1f}</b> (-4.5 pts &gt;&gt; Move stop to BE)",
         f"• <b>Tranche 2A (Fixed 3 cts):</b> Limit <b>{short_t2a:.1f}</b> (-14.0 pts extended impulse)",
-        f"• <b>Tranche 2B (Runner 3 cts):</b> Chandelier Trail &gt;&gt; Low + {1.5*s50_atr:.1f} pts (Initial: <b>{chandelier_short:.1f}</b>)",
+        f"• <b>Tranche 2B (Macro Runner 3 cts):</b> Trailed to <b>Daily EMA(20) [{s50_daily_ema20:.1f}]</b> (-25 to -35 pts expansion)",
         "━━━━━━━━━━━━━━━━━━",
         "🔥 <b>HOUSE MONEY PYRAMID TICKET (+2 Contracts):</b>",
         f"• Trigger: After T1 banks (-4.5 pts), place <b>SELL OPEN +2 cts</b> on next 15M breakdown.",
@@ -298,6 +307,30 @@ elif is_short_authorized:
         "━━━━━━━━━━━━━━━━━━",
         "📲 <b>QUICK ORDER:</b>",
         f"<code>SELL OPEN S50 10 cts @ {s50_price:.1f} | Stop: {s50_price + stop_distance:.1f}</code>"
+    ])
+elif auction_reclaim_long:
+    lines.extend([
+        "⚡ <b>ALPHA VECTOR: OPENING AUCTION RECLAIM (LONG)</b>",
+        "📋 <b>TACTICAL SCALP TICKET (4 Contracts):</b>",
+        f"• Trigger: Opening auction sweep flushed below VAL ({prior_val:.1f}) & reclaimed.",
+        f"• Limit Entry: <b>{s50_price:.1f}</b>",
+        f"• Tight Stop: <b>{s50_price - 1.8:.1f}</b> (-1.8 pts hard stop)",
+        f"• Profit Target: <b>{s50_price + 3.0:.1f}</b> (+3.0 pts fair value reversion)",
+        "━━━━━━━━━━━━━━━━━━",
+        "📲 <b>QUICK ORDER:</b>",
+        f"<code>BUY OPEN S50 4 cts @ {s50_price:.1f} | Stop: {s50_price - 1.8:.1f}</code>"
+    ])
+elif auction_reclaim_short:
+    lines.extend([
+        "⚡ <b>ALPHA VECTOR: OPENING AUCTION RECLAIM (SHORT)</b>",
+        "📋 <b>TACTICAL SCALP TICKET (4 Contracts):</b>",
+        f"• Trigger: Opening auction sweep squeezed above VAH ({prior_vah:.1f}) & rejected.",
+        f"• Limit Entry: <b>{s50_price:.1f}</b>",
+        f"• Tight Stop: <b>{s50_price + 1.8:.1f}</b> (+1.8 pts hard stop)",
+        f"• Profit Target: <b>{s50_price - 3.0:.1f}</b> (-3.0 pts fair value reversion)",
+        "━━━━━━━━━━━━━━━━━━",
+        "📲 <b>QUICK ORDER:</b>",
+        f"<code>SELL OPEN S50 4 cts @ {s50_price:.1f} | Stop: {s50_price + 1.8:.1f}</code>"
     ])
 else:
     reasons = []
@@ -315,7 +348,13 @@ else:
         "• <b>Action:</b> Stand down. Zero edge. <i>(Silent notification)</i>"
     ])
 
-lines.append("━━━━━━━━━━━━━━━━━━\n<i>Automated pipeline running via GitHub Cloud.</i>")
+# Treasury Yield Stacking Footer
+lines.extend([
+    "━━━━━━━━━━━━━━━━━━",
+    "🏦 <b>TREASURY STACK:</b> ฿700k Unencumbered in MMF/EZ (~+฿1,150/mo yield)",
+    "<i>Automated pipeline running via GitHub Cloud.</i>"
+])
+
 full_msg = "\n".join(lines)
 
 keyboard = {
