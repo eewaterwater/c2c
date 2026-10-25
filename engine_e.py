@@ -206,7 +206,41 @@ if circuit_breaker_active:
     r_label = f"0.0R (HALTED: {circuit_reason})"
     risk_authorized = False
 
-# 5. Universe Definition
+# 5. Core ETF & Vault A Structural Monitor (SMH, QQQM, VOO)
+core_etfs = [
+    {"symbol": "SMH",  "role": "Semiconductor Alpha / Vault A (35%)"},
+    {"symbol": "QQQM", "role": "Nasdaq-100 Core / Vault A (55%)"},
+    {"symbol": "VOO",  "role": "S&P 500 Broad Market Macro Anchor"}
+]
+
+etf_monitor_lines = []
+for item in core_etfs:
+    sym = item["symbol"]
+    role = item["role"]
+    try:
+        etf_df = yf.download(sym, period="1y", interval="1d", progress=False)
+        c_etf = safe_series(etf_df, "Close")
+        if len(c_etf) >= 200:
+            p_cur = float(c_etf[-1])
+            s_etf = pd.Series(c_etf)
+            ema21_etf = float(s_etf.ewm(span=21, adjust=False).mean().iloc[-1])
+            sma200_etf = float(s_etf.rolling(200).mean().iloc[-1])
+
+            dist_21 = ((p_cur - ema21_etf) / ema21_etf) * 100.0
+            dist_200 = ((p_cur - sma200_etf) / sma200_etf) * 100.0
+
+            trend_status = "🟢 Bullish" if p_cur >= ema21_etf and dist_200 > 0 else (
+                "🟡 Pullback" if p_cur < ema21_etf and dist_200 > 0 else "🔴 Bearish"
+            )
+
+            etf_monitor_lines.append(
+                f"• <b>{sym}</b> (${p_cur:.2f}): {trend_status}\n"
+                f"   └ 21 EMA: <code>{dist_21:+.1f}%</code> | 200 SMA: <code>{dist_200:+.1f}%</code> | <i>{role}</i>"
+            )
+    except Exception as e:
+        print(f"Error ETF {sym}: {e}")
+
+# 6. Active Watchpool (US Leaders & DR/DRx)
 watchpool = [
     {"ticker": "NVDA",  "dr": "NVDA80X",   "ratio": 200,   "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "SMH", "is_etf": False},
     {"ticker": "PLTR",  "dr": "PLTR01",    "ratio": 1100,  "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "XLK", "is_etf": False},
@@ -411,6 +445,9 @@ lines.extend([
     f"• <b>Vault A Target:</b> <code>{vault_a_alloc}</code>",
     f"• <b>Circuit Status:</b> Streak: <b>{win_streak}W</b> | Daily Stops: <b>{state.get('daily_stopouts', 0)}/2</b>",
     "━━━━━━━━━━━━━━━━━━",
+    "🏛️ <b>CORE VAULT A & ETF MACRO STACK:</b>",
+    "\n".join(etf_monitor_lines) if etf_monitor_lines else "• ETF data pending",
+    "━━━━━━━━━━━━━━━━━━",
     "🔍 <b>WATCHPOOL METRICS (Sector-Benchmarked RS):</b>",
     "\n".join(summary_lines) if summary_lines else "• Data pending",
     "━━━━━━━━━━━━━━━━━━"
@@ -435,21 +472,13 @@ full_msg = "\n".join(lines)
 keyboard_buttons = [
     [
         {"text": "📲 Open InnovestX", "url": "https://play.google.com/store/apps/details?id=com.scbs.easyinvest"}
+    ],
+    [
+        {"text": "📈 SMH Chart", "url": "https://www.tradingview.com/chart/?symbol=NASDAQ%3ASMH"},
+        {"text": "📈 QQQM Chart", "url": "https://www.tradingview.com/chart/?symbol=NASDAQ%3AQQQM"},
+        {"text": "📈 VOO Chart", "url": "https://www.tradingview.com/chart/?symbol=AMEX%3AVOO"}
     ]
 ]
-
-if top_picks:
-    for p in top_picks:
-        sym = p["ticker"]
-        exch = p.get("exchange", "NASDAQ")
-        tv_chart_url = f"https://www.tradingview.com/chart/?symbol={exch}%3A{sym}"
-        keyboard_buttons.append([
-            {"text": f"📈 {sym} Chart", "url": tv_chart_url}
-        ])
-else:
-    keyboard_buttons.append([
-        {"text": "📈 QQQ Chart", "url": "https://www.tradingview.com/chart/?symbol=NASDAQ%3AQQQ"}
-    ])
 
 keyboard = {"inline_keyboard": keyboard_buttons}
 
