@@ -18,7 +18,7 @@ ny_now = datetime.now(pytz.timezone("America/New_York"))
 ny_date_str = ny_now.strftime("%Y-%m-%d")
 bkk_time_str = bkk_now.strftime("%Y-%m-%d %H:%M:%S")
 
-# 1. State Maintenance
+# 1. State Maintenance (With Fallback Resilience)
 state_path = "state.json"
 state = {
     "consecutive_wins": 0,
@@ -27,6 +27,7 @@ state = {
     "last_trade_date": ny_date_str,
     "active_position": None
 }
+
 if os.path.exists(state_path):
     try:
         with open(state_path, "r") as f:
@@ -68,13 +69,13 @@ elif state.get("weekly_stopouts", 0) >= 3:
 win_streak = state.get("consecutive_wins", 0)
 streak_boost = win_streak >= 3
 
-# 2. Market Calendar Check
+# 2. Market Calendar Check (NYSE / NASDAQ)
 is_us_open_today = True
 try:
     import exchange_calendars as xcals
     xnys = xcals.get_calendar("XNYS")
     is_us_open_today = bool(xnys.is_session(pd.Timestamp(ny_date_str)))
-except Exception as e:
+except Exception:
     is_us_open_today = ny_now.weekday() < 5
 
 if not is_us_open_today and event_name == "schedule":
@@ -82,7 +83,7 @@ if not is_us_open_today and event_name == "schedule":
         f"⏸️ <b>[C2C Engine E - US Markets Closed]</b>\n"
         f"📅 <b>Date:</b> {ny_date_str} (US)\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"• <b>Status:</b> NYSE / NASDAQ is closed today.\n"
+        f"• <b>Status:</b> NYSE / NASDAQ is closed today (Holiday/Weekend).\n"
         f"• <b>Action:</b> Standing down. No US DR scan executed.\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"<i>Automated pipeline running via GitHub Cloud.</i>"
@@ -99,13 +100,13 @@ notice_header = ""
 if not is_us_open_today:
     notice_header = "⚠️ <b>[TEST MODE: US Market Closed Today - Using Prior Close]</b>\n"
 
-def safe_series(df):
+def safe_series(df, col="Close"):
     if df is None or df.empty:
         return np.array([])
     try:
         if isinstance(df.columns, pd.MultiIndex):
-            return df["Close"].iloc[:, 0].dropna().values
-        return df["Close"].dropna().values
+            return df[col].iloc[:, 0].dropna().values
+        return df[col].dropna().values
     except Exception:
         return np.array([])
 
@@ -119,7 +120,7 @@ try:
 except Exception as e:
     print(f"FX Error: {e}")
 
-# 4. Macro Regime Classifier
+# 4. Hierarchical 4-Regime Classifier (QQQ Multi-Timeframe)
 regime_name = "Regime 3: Rangebound Chop"
 regime_icon = "🟡"
 r_thb = 15000.0
@@ -130,17 +131,26 @@ qqq_3d_ret = 0.0
 
 try:
     qqq_df = yf.download("QQQ", period="1y", interval="1d", progress=False)
-    c_qqq = safe_series(qqq_df)
+    c_qqq = safe_series(qqq_df, "Close")
     if len(c_qqq) >= 200:
         p_now = float(c_qqq[-1])
-        p_ema20 = float(pd.Series(c_qqq).ewm(span=20, adjust=False).mean().iloc[-1])
-        p_ema50 = float(pd.Series(c_qqq).ewm(span=50, adjust=False).mean().iloc[-1])
-        p_sma200 = float(pd.Series(c_qqq).rolling(200).mean().iloc[-1])
+        s_qqq = pd.Series(c_qqq)
+        p_ema20 = float(s_qqq.ewm(span=20, adjust=False).mean().iloc[-1])
+        p_ema50 = float(s_qqq.ewm(span=50, adjust=False).mean().iloc[-1])
+        sma200_series = s_qqq.rolling(200).mean()
+        p_sma200 = float(sma200_series.iloc[-1])
 
         if len(c_qqq) >= 4:
             qqq_3d_ret = ((p_now - c_qqq[-4]) / c_qqq[-4]) * 100.0
 
-        if p_now < p_sma200 * 0.985:
+        # Regime 4 requires 3 consecutive daily closes < 200 SMA by >= 1.5%
+        is_bear_confirmed = False
+        if len(c_qqq) >= 3 and len(sma200_series) >= 3:
+            recent_closes = c_qqq[-3:]
+            recent_smas = sma200_series.values[-3:]
+            is_bear_confirmed = all(c < (sma * 0.985) for c, sma in zip(recent_closes, recent_smas))
+
+        if is_bear_confirmed:
             regime_name = "Regime 4: Structural Bear"
             regime_icon = "🔴"
             r_thb = 0.0
@@ -177,7 +187,7 @@ if circuit_breaker_active:
     r_label = f"0.0R (HALTED: {circuit_reason})"
     risk_authorized = False
 
-# 5. Watchpool (12 Core High-Beta & Healthcare Leaders)
+# 5. Core Watchpool (High-Beta Momentum & Mega-Cap Tech)
 watchpool = [
     {"ticker": "NVDA",  "dr": "NVDA80X", "ratio": 200,  "exchange": "NASDAQ"},
     {"ticker": "PLTR",  "dr": "PLTR01",  "ratio": 1100, "exchange": "NASDAQ"},
@@ -204,23 +214,25 @@ for item in watchpool:
     try:
         t_obj = yf.Ticker(sym)
         hist = t_obj.history(period="3mo", interval="1d")
-        c = safe_series(hist)
+        c = safe_series(hist, "Close")
+        lows = safe_series(hist, "Low")
         if len(c) < 25:
             continue
 
         curr_p = float(c[-1])
-        ema21 = float(pd.Series(c).ewm(span=21, adjust=False).mean().iloc[-1])
+        s_c = pd.Series(c)
+        ema21 = float(s_c.ewm(span=21, adjust=False).mean().iloc[-1])
 
         p_3d = float(c[-4]) if len(c) >= 4 else curr_p
         stock_ret = ((curr_p - p_3d) / p_3d) * 100.0
         rs_delta = stock_ret - qqq_3d_ret
 
-        s_c = pd.Series(c)
         sma20 = s_c.rolling(20).mean()
         std20 = s_c.rolling(20).std()
         bbw = ((sma20 + 2*std20) - (sma20 - 2*std20)) / sma20 * 100.0
         is_compressed = bool(bbw.iloc[-1] <= bbw.tail(60).quantile(0.25))
 
+        # 5 Trading Days (120 Hours) Earnings Blackout Gate
         imminent_earn = False
         try:
             cal = t_obj.calendar
@@ -232,17 +244,23 @@ for item in watchpool:
                     dt = pd.to_datetime(cal["Earnings Date"][0])
                 if dt:
                     dt_naive = dt.tz_localize(None) if dt.tzinfo else dt
-                    if 0 <= (dt_naive - datetime.now()).days <= 3:
+                    days_diff = (dt_naive - datetime.now()).days
+                    if 0 <= days_diff <= 5:
                         imminent_earn = True
         except Exception:
             pass
 
         dist_21 = ((curr_p - ema21) / ema21) * 100.0
         comp_tag = "📦 Squeeze" if is_compressed else "Normal"
+        earn_tag = " [⚠️ EARN]" if imminent_earn else ""
 
         summary_lines.append(
-            f"• <b>{dr_sym}</b> (${curr_p:.2f}): RS {rs_delta:+.1f}% | 21EMA {dist_21:+.1f}% | {comp_tag}"
+            f"• <b>{dr_sym}</b> (${curr_p:.2f}): RS {rs_delta:+.1f}% | 21EMA {dist_21:+.1f}% | {comp_tag}{earn_tag}"
         )
+
+        # Structural Stop Calculation: min(last 3 days lows) capped at max -2.5%
+        recent_low = float(np.min(lows[-3:])) if len(lows) >= 3 else curr_p * 0.975
+        structural_stop = max(recent_low * 0.998, curr_p * 0.975)
 
         if (curr_p >= ema21 * 0.99) and (not imminent_earn) and (rs_delta > 0) and risk_authorized:
             candidates.append({
@@ -252,7 +270,7 @@ for item in watchpool:
                 "usd_price": curr_p,
                 "ratio": ratio,
                 "rs": rs_delta,
-                "stop_usd": curr_p * 0.975
+                "stop_usd": structural_stop
             })
     except Exception as e:
         print(f"Error {sym}: {e}")
@@ -281,7 +299,7 @@ if top_picks and risk_authorized and r_thb > 0:
 
         raw_units = int(r_thb / risk_per_unit)
         raw_outlay = raw_units * entry_thb
-        max_cap = 600000.0
+        max_cap = 600000.0  # 20% Hard Cap of ฿3.0M Vault B
         if raw_outlay > max_cap:
             units = int(max_cap / entry_thb)
             capped_tag = " <i>(Capped at 20% Vault B)</i>"
@@ -292,14 +310,16 @@ if top_picks and risk_authorized and r_thb > 0:
         target1_thb = entry_thb + (1.5 * risk_per_unit)
         t1_units = int(units * 0.60)
         t2_units = units - t1_units
+        stop_pct = ((stop_usd - entry_usd) / entry_usd) * 100.0
 
         ticket_blocks.extend([
             f"🎯 <b>{p['dr']} ({p['ticker']}) Setup:</b>",
             f"  • Entry: <b>฿{entry_thb:.2f}</b> (${entry_usd:.2f})",
-            f"  • Hard Stop: <b>฿{stop_thb:.2f}</b> (-2.5%)",
+            f"  • Hard Stop: <b>฿{stop_thb:.2f}</b> ({stop_pct:.1f}% structural pivot)",
             f"  • Sizing: <b>{units:,} units</b> (Outlay: ฿{units*entry_thb:,.0f} THB){capped_tag}",
             f"  • <b>T1 (Bank 60% / {t1_units:,} u):</b> Limit <b>฿{target1_thb:.2f}</b> (+1.5R &gt;&gt; Move stop to BE)",
-            f"  • <b>T2 (Runner 40% / {t2_units:,} u):</b> Dynamic Trail &gt;&gt; Hold while Daily Close &ge; 21 EMA",
+            f"  • <b>T2 (Runner 40% / {t2_units:,} u):</b> Dynamic Trail &gt;&gt; Daily Close &ge; 21 EMA",
+            f"  • <b>Time-Stop:</b> 72-Hour Velocity Rule (Flatten if T1 unhit in 3 sessions)",
             ""
         ])
 
@@ -309,7 +329,7 @@ if top_picks and risk_authorized and r_thb > 0:
 elif circuit_breaker_active:
     ticket_blocks.append(f"⛔ <b>CIRCUIT BREAKER TRIGGERED:</b>\n• {circuit_reason}\n• All new buy orders suppressed.")
 else:
-    ticket_blocks.append("📋 <b>EXECUTION:</b> Zero breakout setups qualified. Retain cash in MMF. <i>(Silent notification)</i>")
+    ticket_blocks.append("📋 <b>EXECUTION:</b> Zero breakout setups qualified. Retain cash in SCB EZ / MMF. <i>(Silent notification)</i>")
 
 is_silent = not has_executable_trade
 
@@ -326,7 +346,7 @@ lines.extend([
     f"📊 <b>MACRO REGIME:</b> {regime_icon} <b>{regime_name}</b>",
     f"• <b>Risk Budget:</b> <b>{r_label}</b>",
     f"• <b>Vault A Target:</b> <code>{vault_a_alloc}</code>",
-    f"• <b>State:</b> Win Streak: <b>{win_streak}</b> | Daily Stops: <b>{state.get('daily_stopouts', 0)}/2</b>",
+    f"• <b>Circuit Status:</b> Streak: <b>{win_streak}W</b> | Daily Stops: <b>{state.get('daily_stopouts', 0)}/2</b>",
     "━━━━━━━━━━━━━━━━━━",
     "🔍 <b>WATCHPOOL METRICS:</b>",
     "\n".join(summary_lines) if summary_lines else "• Data pending",
@@ -341,7 +361,6 @@ if settrade_copy_blocks:
 lines.append("━━━━━━━━━━━━━━━━━━\n<i>Automated pipeline running via GitHub Cloud.</i>")
 full_msg = "\n".join(lines)
 
-# Direct TradingView Charts + InnovestX
 keyboard_buttons = [
     [
         {"text": "📲 Open InnovestX", "url": "https://play.google.com/store/apps/details?id=com.scbs.easyinvest"}
