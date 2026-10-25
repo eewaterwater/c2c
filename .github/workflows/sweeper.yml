@@ -1,0 +1,28 @@
+name: C2C Weekly Profit Sweeper
+
+on:
+  schedule:
+    - cron: '5 10 * * 5'   # 17:05 BKK every Friday (10:05 UTC)
+  workflow_dispatch:
+
+jobs:
+  sweep-and-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install requests pytz
+
+      - name: Run Sweeper
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python sweeper.py
