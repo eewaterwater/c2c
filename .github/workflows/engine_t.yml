@@ -26,7 +26,8 @@ jobs:
           python-version: '3.11'
 
       - name: Install Dependencies
-        run: pip install yfinance pandas numpy requests pytz
+        run: |
+          pip install yfinance pandas numpy requests pytz exchange_calendars
 
       - name: Execute Engine T
         env:
