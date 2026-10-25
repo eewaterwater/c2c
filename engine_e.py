@@ -80,28 +80,13 @@ try:
 except Exception:
     is_us_open_today = (ny_now.weekday() < 5)
 
-if not is_us_open_today and event_name == "schedule":
-    msg = (
-        f"⏸️ <b>[C2C Engine E - US Markets Closed]</b>\n"
-        f"📅 <b>Date:</b> {ny_date_str} (US)\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"• <b>Status:</b> NYSE / NASDAQ is closed today (Holiday/Weekend).\n"
-        f"• <b>Action:</b> Standing down. No US DR scan executed.\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Automated pipeline running via GitHub Cloud.</i>"
-    )
-    if token and chat_id:
-        requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML", "disable_notification": True},
-            timeout=15
-        )
-    print("Market closed & schedule trigger. Exiting cleanly.")
-    sys.exit(0)
-
 notice_header = ""
 if not is_us_open_today:
-    notice_header = "⚠️ <b>[TEST MODE: US Market Closed - Using Prior Session Close]</b>\n"
+    if event_name == "schedule":
+        print("Market closed & schedule trigger. Standing down cleanly.")
+        sys.exit(0)
+    else:
+        notice_header = "⚠️ <b>[TEST RUN: US Market Closed - Using Prior Close Data]</b>\n"
 
 def safe_series(df, col="Close"):
     if df is None or df.empty:
@@ -264,7 +249,7 @@ for item in watchpool:
         s_c = pd.Series(c)
         ema21 = float(s_c.ewm(span=21, adjust=False).mean().iloc[-1])
 
-        # Sector-Level Relative Strength (60% 3D / 40% 10D vs Direct Sector Bench)
+        # Sector Relative Strength (60% 3D / 40% 10D vs Direct Sector Bench)
         b_3d, b_10d = bench_returns.get(bench_sym, (qqq_3d, qqq_10d))
         p_3d = float(c[-4]) if len(c) >= 4 else curr_p
         p_10d = float(c[-11]) if len(c) >= 11 else curr_p
@@ -275,7 +260,6 @@ for item in watchpool:
         rs_delta_10d = ret_10d - b_10d
         composite_rs = (0.60 * rs_delta_3d) + (0.40 * rs_delta_10d)
 
-        # Volatility Squeeze & Volume Dry-Up
         sma20 = s_c.rolling(20).mean()
         std20 = s_c.rolling(20).std()
         bbw = ((sma20 + 2*std20) - (sma20 - 2*std20)) / sma20 * 100.0
@@ -357,7 +341,7 @@ if top_picks and risk_authorized and r_thb > 0:
 
         raw_units = int(r_thb / risk_per_unit)
         raw_outlay = raw_units * entry_thb
-        max_cap = 600000.0  # 20% Hard Cap of ฿3.0M Vault B
+        max_cap = 600000.0
         if raw_outlay > max_cap:
             units = int(max_cap / entry_thb)
             capped_tag = " <i>(Capped at 20% Vault B)</i>"
@@ -398,3 +382,105 @@ if top_picks and risk_authorized and r_thb > 0:
         )
 elif circuit_breaker_active:
     ticket_blocks.append(f"⛔ <b>CIRCUIT BREAKER TRIGGERED:</b>\n• {circuit_reason}\n• All new buy orders suppressed.")
+elif vix_elevated:
+    ticket_blocks.append(f"⚠️ <b>VOLATILITY GATE ACTIVE:</b>\n• VIX at {vix_val:.1f} (&gt; 28.0). High-beta breakouts vetoed.")
+else:
+    ticket_blocks.append("📋 <b>EXECUTION:</b> Zero breakout setups qualified. Retain cash in SCB EZ / MMF.")
+
+lines = []
+if notice_header:
+    lines.append(notice_header)
+
+title_tag = "🚨 <b>[ACTION REQUIRED: US DRx ENTRY]</b>" if has_executable_trade else "🇺🇸 <b>[C2C Engine E - Dual-Vault Briefing]</b>"
+vix_icon = "🟢" if vix_val < 20 else ("🟡" if vix_val <= 28 else "🔴 HIGH")
+
+lines.extend([
+    title_tag,
+    f"📅 <b>Time:</b> {bkk_time_str} BKK",
+    f"💵 <b>USD/THB:</b> ฿{usd_thb:.2f} | <b>VIX:</b> {vix_val:.1f} [{vix_icon}]",
+    "━━━━━━━━━━━━━━━━━━",
+    f"📊 <b>MACRO REGIME:</b> {regime_icon} <b>{regime_name}</b>",
+    f"• <b>Risk Budget:</b> <b>{r_label}</b>",
+    f"• <b>Vault A Target:</b> <code>{vault_a_alloc}</code>",
+    f"• <b>Circuit Status:</b> Streak: <b>{win_streak}W</b> | Daily Stops: <b>{state.get('daily_stopouts', 0)}/2</b>",
+    "━━━━━━━━━━━━━━━━━━",
+    "🔍 <b>WATCHPOOL METRICS (Sector-Benchmarked RS):</b>",
+    "\n".join(summary_lines) if summary_lines else "• Data pending",
+    "━━━━━━━━━━━━━━━━━━"
+])
+lines.extend(ticket_blocks)
+
+if is_friday:
+    lines.extend([
+        "━━━━━━━━━━━━━━━━━━",
+        "🛡️ <b>FRIDAY OVERNIGHT COLLAR DIRECTIVE:</b>",
+        "• If T1 is not banked before market close, tighten stop to BE or flatten to eliminate unhedged weekend gap risk.",
+        "• If Net Long Exposure &gt; ฿1.5M and VIX &gt; 22, park hedge tranche in SGOV."
+    ])
+
+if settrade_copy_blocks:
+    lines.append("━━━━━━━━━━━━━━━━━━\n📲 <b>SETTRADE QUICK-PASTE:</b>")
+    lines.extend(settrade_copy_blocks)
+
+lines.append("━━━━━━━━━━━━━━━━━━\n<i>Automated pipeline running via GitHub Cloud.</i>")
+full_msg = "\n".join(lines)
+
+keyboard_buttons = [
+    [
+        {"text": "📲 Open InnovestX", "url": "https://play.google.com/store/apps/details?id=com.scbs.easyinvest"}
+    ]
+]
+
+if top_picks:
+    for p in top_picks:
+        sym = p["ticker"]
+        exch = p.get("exchange", "NASDAQ")
+        tv_chart_url = f"https://www.tradingview.com/chart/?symbol={exch}%3A{sym}"
+        keyboard_buttons.append([
+            {"text": f"📈 {sym} Chart", "url": tv_chart_url}
+        ])
+else:
+    keyboard_buttons.append([
+        {"text": "📈 QQQ Chart", "url": "https://www.tradingview.com/chart/?symbol=NASDAQ%3AQQQ"}
+    ])
+
+keyboard = {"inline_keyboard": keyboard_buttons}
+
+if token and chat_id:
+    res = requests.post(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        json={
+            "chat_id": chat_id,
+            "text": full_msg,
+            "parse_mode": "HTML",
+            "disable_notification": False,
+            "reply_markup": keyboard
+        },
+        timeout=15
+    )
+    print(f"Telegram status: {res.status_code}")
+    if res.status_code != 200:
+        print(f"Telegram error response: {res.text}")
+        clean_plain = (
+            full_msg.replace("<b>", "")
+            .replace("</b>", "")
+            .replace("<code>", "")
+            .replace("</code>", "")
+            .replace("<i>", "")
+            .replace("</i>", "")
+            .replace("&gt;", ">")
+            .replace("&lt;", "<")
+        )
+        res_fb = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": clean_plain,
+                "disable_notification": False,
+                "reply_markup": keyboard
+            },
+            timeout=15
+        )
+        print(f"Fallback plain text status: {res_fb.status_code}")
+else:
+    print("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
