@@ -52,14 +52,7 @@ if state["circuit_breakers"].get("date") != today_str:
     state["circuit_breakers"]["daily_stopouts"] = 0
     state["circuit_breakers"]["date"] = today_str
 
-# 2. Market Feeds: S50Z26 (Futures), SET50 (Cash), and DELTA
-s50_symbol = "S50Z26.BK"
-s50_price = 0.0
-pdh = 0.0
-pdl = 0.0
-pdc = 0.0
-is_direct_contract = False
-
+# 2. Reliable Market Feeds: ^SET50.BK & DELTA.BK
 def extract_ohlc(df):
     if df is None or df.empty:
         return 0.0, 0.0, 0.0, 0.0
@@ -67,74 +60,64 @@ def extract_ohlc(df):
         c = df["Close"].iloc[:, 0].dropna() if isinstance(df.columns, pd.MultiIndex) else df["Close"].dropna()
         h = df["High"].iloc[:, 0].dropna() if isinstance(df.columns, pd.MultiIndex) else df["High"].dropna()
         l = df["Low"].iloc[:, 0].dropna() if isinstance(df.columns, pd.MultiIndex) else df["Low"].dropna()
-        curr = float(c.iloc[-1]) if len(c) > 0 else 0.0
+        if len(c) == 0:
+            return 0.0, 0.0, 0.0, 0.0
+        curr = float(c.iloc[-1])
         prev_c = float(c.iloc[-2]) if len(c) >= 2 else curr
         prev_h = float(h.iloc[-2]) if len(h) >= 2 else curr
         prev_l = float(l.iloc[-2]) if len(l) >= 2 else curr
         return curr, prev_c, prev_h, prev_l
-    except Exception:
+    except Exception as e:
+        print(f"OHLC extraction error: {e}")
         return 0.0, 0.0, 0.0, 0.0
 
-# Try specific contract ticker variations on Yahoo Finance
-for ticker_variant in ["S50Z26.BK", "S50Z26.TX", "S50Z2026.BK"]:
+s50_price, pdc, pdh, pdl = 0.0, 0.0, 0.0, 0.0
+active_ticker = "^SET50.BK"
+
+# Prioritize ^SET50.BK, fallback to ^SET50 if ever needed
+for t_sym in ["^SET50.BK", "^SET50"]:
     try:
-        fut_df = yf.download(ticker_variant, period="1mo", interval="1d", progress=False)
-        p, c, h, l = extract_ohlc(fut_df)
+        df_feed = yf.download(t_sym, period="1mo", interval="1d", progress=False)
+        p, c, h, l = extract_ohlc(df_feed)
         if p > 0:
             s50_price, pdc, pdh, pdl = p, c, h, l
-            s50_symbol = ticker_variant
-            is_direct_contract = True
+            active_ticker = t_sym
             break
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Error fetching {t_sym}: {e}")
 
-# Fallback to ^SET50 cash index if the individual futures contract feed is not indexed
-set50_cash = 0.0
-try:
-    cash_df = yf.download("^SET50", period="1mo", interval="1d", progress=False)
-    p_cash, c_cash, h_cash, l_cash = extract_ohlc(cash_df)
-    set50_cash = p_cash
-    if not is_direct_contract and p_cash > 0:
-        s50_price, pdc, pdh, pdl = p_cash, c_cash, h_cash, l_cash
-        s50_symbol = "S50Z26 (Mapped from ^SET50)"
-except Exception:
-    pass
-
-# Basis Calculation (Futures Price - Cash Index)
-basis_str = "N/A"
-if is_direct_contract and set50_cash > 0:
-    basis = s50_price - set50_cash
-    basis_str = f"{basis:+.2f} pts"
-
+# Check DELTA Decoupler
 delta_pct = 0.0
 try:
     delta_df = yf.download("DELTA.BK", period="1mo", interval="1d", progress=False)
-    if delta_df is not None and not delta_df.empty:
-        c_del = delta_df["Close"].iloc[:, 0].dropna() if isinstance(delta_df.columns, pd.MultiIndex) else delta_df["Close"].dropna()
-        if len(c_del) >= 2:
-            delta_pct = ((float(c_del.iloc[-1]) - float(c_del.iloc[-2])) / float(c_del.iloc[-2])) * 100.0
-except Exception:
-    pass
+    p_d, c_d, _, _ = extract_ohlc(delta_df)
+    if c_d > 0 and p_d > 0:
+        delta_pct = ((p_d - c_d) / c_d) * 100.0
+except Exception as e:
+    print(f"DELTA error: {e}")
+
+if s50_price <= 0:
+    print("FATAL: SET50 feed offline. Standing down.")
+    sys.exit(0)
+
+# Typical front-month basis is near parity or +/- 1-2 points
+poc_est = (pdh + pdl + pdc) / 3.0
+vah_est = pdh
+val_est = pdl
 
 is_pre_open_scan = (bkk_now.hour == 9 and bkk_now.minute < 45)
 
-# Value Area / Support & Resistance Estimations
-poc_est = (pdh + pdl + pdc) / 3.0 if (pdh and pdl and pdc) else s50_price
-vah_est = pdh if pdh > 0 else s50_price + 3.0
-val_est = pdl if pdl > 0 else s50_price - 3.0
-
-# 3. Process State Machine & Breakeven Ratchets
+# 3. State Machine & Breakeven Ratchets
 t_state = state["engine_t"]
 status = t_state.get("status", "FLAT")
 alert_lines = []
 
-if status != "FLAT" and s50_price > 0 and not is_pre_open_scan:
+if status != "FLAT" and not is_pre_open_scan:
     entry = t_state.get("entry_price", 0.0)
     direction = t_state.get("direction", "BUY")
     t1 = t_state.get("t1_target", 0.0)
     stop = t_state.get("current_stop", 0.0)
     
-    # Check T1 Bank Target
     if status == "ACTIVE_INITIAL":
         t1_hit = (s50_price >= t1) if direction == "BUY" else (s50_price <= t1)
         if t1_hit:
@@ -149,7 +132,6 @@ if status != "FLAT" and s50_price > 0 and not is_pre_open_scan:
             alert_lines.append("• <b>Remaining Contracts:</b> Stop pulled to Breakeven (0.0 pt).")
             alert_lines.append("• <b>Pyramiding Status:</b> 🟢 AUTHORIZED (+2 contracts on secondary base).")
 
-    # Check Stop Loss
     stop_hit = (s50_price <= stop) if direction == "BUY" else (s50_price >= stop)
     if stop_hit:
         loss_pts = abs(entry - stop) if status == "ACTIVE_INITIAL" else 0.0
@@ -189,17 +171,17 @@ if is_pre_open_scan:
         "🌅 <b>[ENGINE T: 09:45 S50Z26 AUCTION WICK PREP]</b>\n"
         f"📅 <b>Time:</b> <code>{html.escape(bkk_time_str)} BKK</code>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"• <b>Contract:</b> <code>{html.escape(s50_symbol)}</code>\n"
+        f"• <b>Contract:</b> <code>S50Z26 (Index: {active_ticker})</code>\n"
         f"• <b>Prior Close (PDC):</b> <code>{pdc:.2f} pts</code>\n"
         f"• <b>Prior High (PDH / VAH):</b> <code>{vah_est:.2f} pts</code>\n"
         f"• <b>Prior Low (PDL / VAL):</b> <code>{val_est:.2f} pts</code>\n"
-        f"• <b>Futures Basis (S50 - Cash):</b> <code>{basis_str}</code>\n"
+        f"• <b>Est. POC Base:</b> <code>{poc_est:.2f} pts</code>\n"
         f"• <b>DELTA Decoupler:</b> <code>{delta_pct:+.2f}%</code> ({delta_flag})\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "🎯 <b>S50Z26 AUCTION WICK LIMITS (09:45–10:00 BKK):</b>\n"
-        f"• <b>Long Wick Fade:</b> Limit Buy at <b>{val_est:.1f}</b> | Stop: {val_est - 2.0:.1f} (-2.0 pts)\n"
-        f"• <b>Short Wick Fade:</b> Limit Short at <b>{vah_est:.1f}</b> | Stop: {vah_est + 2.0:.1f} (+2.0 pts)\n"
-        "• <b>Target:</b> Bank +2.0 to +3.0 pts into initial wick rebound.\n"
+        f"• <b>Long Wick Fade:</b> Limit Buy at <b>{val_est:.1f}</b> | Stop: {val_est - 2.5:.1f} (-2.5 pts)\n"
+        f"• <b>Short Wick Fade:</b> Limit Short at <b>{vah_est:.1f}</b> | Stop: {vah_est + 2.5:.1f} (+2.5 pts)\n"
+        "• <b>Target:</b> Bank +2.0 to +3.0 pts into wick bounce.\n"
         "• <b>⚠️ 09:58 BKK HARD LOCK:</b> Bank or drag stop to exact BE before cash open at 10:00!\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "<i>Next Check: 10:15 BKK (15M MSS Trend Confirmation)</i>"
@@ -209,9 +191,7 @@ else:
         "🇹🇭 <b>[C2C ENGINE T: S50Z26 TACTICAL MONITOR]</b>\n"
         f"📅 <b>Time:</b> <code>{html.escape(bkk_time_str)} BKK</code>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"• <b>Active Contract:</b> <code>{html.escape(s50_symbol)}</code>\n"
-        f"• <b>Current Level:</b> <code>{s50_price:.2f} pts</code>\n"
-        f"• <b>Futures Basis:</b> <code>{basis_str}</code>\n"
+        f"• <b>Active Contract:</b> <code>S50Z26 (Underlying: {s50_price:.2f})</code>\n"
         f"• <b>DELTA Movement:</b> <code>{delta_pct:+.2f}%</code> ({delta_flag})\n"
         f"• <b>Active State:</b> <b>{html.escape(t_state.get('status', 'FLAT'))}</b>\n"
         f"• <b>Open Contracts:</b> <code>{t_state.get('contracts_open', 0)}</code> | "
@@ -243,9 +223,9 @@ keyboard = {
 }
 
 if token and chat_id:
-    requests.post(
+    res = requests.post(
         f"https://api.telegram.org/bot{token}/sendMessage",
         json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML", "reply_markup": keyboard},
         timeout=15
     )
-    print("Engine T S50Z26 execution cycle completed.")
+    print(f"Engine T cycle completed. Status: {res.status_code}")
