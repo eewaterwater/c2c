@@ -2,7 +2,7 @@ name: C2C Engine T (TFEX S50 Scanner)
 
 on:
   schedule:
-    - cron: '35 02 * * 1-5'   # 09:35 BKK - Morning Auction Wick Prep (NEW)
+    - cron: '35 02 * * 1-5'   # 09:35 BKK - Morning Auction Wick Prep
     - cron: '15 03 * * 1-5'   # 10:15 BKK - Morning Session 15M MSS Trigger
     - cron: '45 06 * * 1-5'   # 13:45 BKK - Afternoon Session Alignment
     - cron: '15 09 * * 1-5'   # 16:15 BKK - Friday Flatten Hook & Daily Audit
@@ -24,6 +24,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: main
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -45,4 +46,8 @@ jobs:
           git config --global user.name "C2C State Engine"
           git config --global user.email "bot@code2cash.internal"
           git add state.json
-          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: persist engine_t state [skip ci]" && git push)
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: persist engine_t state [skip ci]"
+            git pull --rebase origin main
+            git push origin main
+          fi
