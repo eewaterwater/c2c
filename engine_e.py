@@ -206,7 +206,7 @@ if circuit_breaker_active:
     r_label = f"0.0R (HALTED: {circuit_reason})"
     risk_authorized = False
 
-# 5. Core ETF & Vault A Structural Monitor (SMH, QQQM, VOO)
+# 5. Core ETF & Vault A Structural Monitor
 core_etfs = [
     {"symbol": "SMH",  "role": "Semiconductor Alpha / Vault A (35%)"},
     {"symbol": "QQQM", "role": "Nasdaq-100 Core / Vault A (55%)"},
@@ -337,7 +337,6 @@ for item in watchpool:
         recent_low = float(np.min(lows[-3:])) if len(lows) >= 3 else curr_p * 0.975
         structural_stop = max(recent_low * 0.998, curr_p * 0.975)
 
-        # Anti-Chase Envelope: Must be between -1.0% and +2.0% of 21 EMA
         within_ema_envelope = (-1.0 <= dist_21 <= 2.0)
         base_quality_ok = is_compressed or vdu_pass
 
@@ -497,7 +496,6 @@ if token and chat_id:
     )
     print(f"Telegram status: {res.status_code}")
     if res.status_code != 200:
-        print(f"Telegram error response: {res.text}")
         clean_plain = (
             full_msg.replace("<b>", "")
             .replace("</b>", "")
