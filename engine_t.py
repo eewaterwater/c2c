@@ -16,7 +16,7 @@ bkk_time_str = bkk_now.strftime("%Y-%m-%d %H:%M:%S")
 today_str = bkk_now.strftime("%Y-%m-%d")
 is_friday = (bkk_now.weekday() == 4)
 
-# 1. State Machine Load & Resilient Key Initialization
+# 1. State Machine Load & Key Initialization
 state_file = "state.json"
 state = {}
 
@@ -52,28 +52,61 @@ if state["circuit_breakers"].get("date") != today_str:
     state["circuit_breakers"]["daily_stopouts"] = 0
     state["circuit_breakers"]["date"] = today_str
 
-# 2. Market Feeds: SET50, DELTA Decoupler & Prior Levels
-delta_pct = 0.0
+# 2. Market Feeds: S50Z26 (Futures), SET50 (Cash), and DELTA
+s50_symbol = "S50Z26.BK"
 s50_price = 0.0
 pdh = 0.0
 pdl = 0.0
 pdc = 0.0
+is_direct_contract = False
 
+def extract_ohlc(df):
+    if df is None or df.empty:
+        return 0.0, 0.0, 0.0, 0.0
+    try:
+        c = df["Close"].iloc[:, 0].dropna() if isinstance(df.columns, pd.MultiIndex) else df["Close"].dropna()
+        h = df["High"].iloc[:, 0].dropna() if isinstance(df.columns, pd.MultiIndex) else df["High"].dropna()
+        l = df["Low"].iloc[:, 0].dropna() if isinstance(df.columns, pd.MultiIndex) else df["Low"].dropna()
+        curr = float(c.iloc[-1]) if len(c) > 0 else 0.0
+        prev_c = float(c.iloc[-2]) if len(c) >= 2 else curr
+        prev_h = float(h.iloc[-2]) if len(h) >= 2 else curr
+        prev_l = float(l.iloc[-2]) if len(l) >= 2 else curr
+        return curr, prev_c, prev_h, prev_l
+    except Exception:
+        return 0.0, 0.0, 0.0, 0.0
+
+# Try specific contract ticker variations on Yahoo Finance
+for ticker_variant in ["S50Z26.BK", "S50Z26.TX", "S50Z2026.BK"]:
+    try:
+        fut_df = yf.download(ticker_variant, period="1mo", interval="1d", progress=False)
+        p, c, h, l = extract_ohlc(fut_df)
+        if p > 0:
+            s50_price, pdc, pdh, pdl = p, c, h, l
+            s50_symbol = ticker_variant
+            is_direct_contract = True
+            break
+    except Exception:
+        pass
+
+# Fallback to ^SET50 cash index if the individual futures contract feed is not indexed
+set50_cash = 0.0
 try:
-    s50_df = yf.download("^SET50", period="1mo", interval="1d", progress=False)
-    if s50_df is not None and not s50_df.empty:
-        c = s50_df["Close"].iloc[:, 0].dropna() if isinstance(s50_df.columns, pd.MultiIndex) else s50_df["Close"].dropna()
-        h = s50_df["High"].iloc[:, 0].dropna() if isinstance(s50_df.columns, pd.MultiIndex) else s50_df["High"].dropna()
-        l = s50_df["Low"].iloc[:, 0].dropna() if isinstance(s50_df.columns, pd.MultiIndex) else s50_df["Low"].dropna()
-        if len(c) > 0:
-            s50_price = float(c.iloc[-1])
-        if len(c) >= 2:
-            pdc = float(c.iloc[-2])
-            pdh = float(h.iloc[-2])
-            pdl = float(l.iloc[-2])
+    cash_df = yf.download("^SET50", period="1mo", interval="1d", progress=False)
+    p_cash, c_cash, h_cash, l_cash = extract_ohlc(cash_df)
+    set50_cash = p_cash
+    if not is_direct_contract and p_cash > 0:
+        s50_price, pdc, pdh, pdl = p_cash, c_cash, h_cash, l_cash
+        s50_symbol = "S50Z26 (Mapped from ^SET50)"
 except Exception:
     pass
 
+# Basis Calculation (Futures Price - Cash Index)
+basis_str = "N/A"
+if is_direct_contract and set50_cash > 0:
+    basis = s50_price - set50_cash
+    basis_str = f"{basis:+.2f} pts"
+
+delta_pct = 0.0
 try:
     delta_df = yf.download("DELTA.BK", period="1mo", interval="1d", progress=False)
     if delta_df is not None and not delta_df.empty:
@@ -83,10 +116,9 @@ try:
 except Exception:
     pass
 
-# Determine if this is the Pre-Open 09:35 Wick Scalp Scan
 is_pre_open_scan = (bkk_now.hour == 9 and bkk_now.minute < 45)
 
-# Calculate Estimated Value Area Extremes for Auction Fades
+# Value Area / Support & Resistance Estimations
 poc_est = (pdh + pdl + pdc) / 3.0 if (pdh and pdl and pdc) else s50_price
 vah_est = pdh if pdh > 0 else s50_price + 3.0
 val_est = pdl if pdl > 0 else s50_price - 3.0
@@ -153,31 +185,33 @@ except Exception as e:
 delta_flag = "⚠️ DECOUPLED" if abs(delta_pct) >= 1.5 else "✅ Normal"
 
 if is_pre_open_scan:
-    # PRE-OPEN AUCTION WICK BRIEFING
     msg = (
-        "🌅 <b>[ENGINE T: 09:45 MORNING AUCTION WICK PREP]</b>\n"
+        "🌅 <b>[ENGINE T: 09:45 S50Z26 AUCTION WICK PREP]</b>\n"
         f"📅 <b>Time:</b> <code>{html.escape(bkk_time_str)} BKK</code>\n"
         "━━━━━━━━━━━━━━━━━━\n"
+        f"• <b>Contract:</b> <code>{html.escape(s50_symbol)}</code>\n"
         f"• <b>Prior Close (PDC):</b> <code>{pdc:.2f} pts</code>\n"
         f"• <b>Prior High (PDH / VAH):</b> <code>{vah_est:.2f} pts</code>\n"
         f"• <b>Prior Low (PDL / VAL):</b> <code>{val_est:.2f} pts</code>\n"
+        f"• <b>Futures Basis (S50 - Cash):</b> <code>{basis_str}</code>\n"
         f"• <b>DELTA Decoupler:</b> <code>{delta_pct:+.2f}%</code> ({delta_flag})\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "🎯 <b>AUCTION WICK STAGING (09:45–10:00 BKK):</b>\n"
+        "🎯 <b>S50Z26 AUCTION WICK LIMITS (09:45–10:00 BKK):</b>\n"
         f"• <b>Long Wick Fade:</b> Limit Buy at <b>{val_est:.1f}</b> | Stop: {val_est - 2.0:.1f} (-2.0 pts)\n"
         f"• <b>Short Wick Fade:</b> Limit Short at <b>{vah_est:.1f}</b> | Stop: {vah_est + 2.0:.1f} (+2.0 pts)\n"
         "• <b>Target:</b> Bank +2.0 to +3.0 pts into initial wick rebound.\n"
-        "• <b>⚠️ 09:58 BKK HARD LOCK:</b> Bank or move stop to exact BE before cash equity open at 10:00!\n"
+        "• <b>⚠️ 09:58 BKK HARD LOCK:</b> Bank or drag stop to exact BE before cash open at 10:00!\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "<i>Next Check: 10:15 BKK (15M MSS Trend Confirmation)</i>"
     )
 else:
-    # REGULAR TACTICAL MONITOR
     msg = (
-        "🇹🇭 <b>[C2C ENGINE T: S50 TACTICAL MONITOR]</b>\n"
+        "🇹🇭 <b>[C2C ENGINE T: S50Z26 TACTICAL MONITOR]</b>\n"
         f"📅 <b>Time:</b> <code>{html.escape(bkk_time_str)} BKK</code>\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        f"• <b>SET50 Level:</b> <code>{s50_price:.2f} pts</code>\n"
+        f"• <b>Active Contract:</b> <code>{html.escape(s50_symbol)}</code>\n"
+        f"• <b>Current Level:</b> <code>{s50_price:.2f} pts</code>\n"
+        f"• <b>Futures Basis:</b> <code>{basis_str}</code>\n"
         f"• <b>DELTA Movement:</b> <code>{delta_pct:+.2f}%</code> ({delta_flag})\n"
         f"• <b>Active State:</b> <b>{html.escape(t_state.get('status', 'FLAT'))}</b>\n"
         f"• <b>Open Contracts:</b> <code>{t_state.get('contracts_open', 0)}</code> | "
@@ -203,7 +237,7 @@ keyboard = {
     "inline_keyboard": [
         [
             {"text": "📲 Open InnovestX", "url": "https://play.google.com/store/apps/details?id=com.scbs.easyinvest"},
-            {"text": "📈 TradingView S50", "url": "https://www.tradingview.com/chart/?symbol=TFEX%3AS501!"}
+            {"text": "📈 TradingView S50Z2026", "url": "https://www.tradingview.com/chart/?symbol=TFEX%3AS50Z2026"}
         ]
     ]
 }
@@ -214,4 +248,4 @@ if token and chat_id:
         json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML", "reply_markup": keyboard},
         timeout=15
     )
-    print("Engine T execution cycle completed.")
+    print("Engine T S50Z26 execution cycle completed.")
