@@ -27,7 +27,6 @@ if os.path.exists(state_file):
     except Exception as e:
         print(f"State load warning: {e}")
 
-# Ensure circuit_breakers sub-dictionary exists cleanly
 if "circuit_breakers" not in state or not isinstance(state["circuit_breakers"], dict):
     state["circuit_breakers"] = {
         "daily_stopouts": state.get("daily_stopouts", 0),
@@ -35,7 +34,6 @@ if "circuit_breakers" not in state or not isinstance(state["circuit_breakers"], 
         "date": today_str
     }
 
-# Ensure engine_t sub-dictionary exists cleanly
 if "engine_t" not in state or not isinstance(state["engine_t"], dict):
     state["engine_t"] = {
         "status": "FLAT",
@@ -50,21 +48,29 @@ if "engine_t" not in state or not isinstance(state["engine_t"], dict):
         "last_update": bkk_time_str
     }
 
-# Daily reset for circuit breakers
 if state["circuit_breakers"].get("date") != today_str:
     state["circuit_breakers"]["daily_stopouts"] = 0
     state["circuit_breakers"]["date"] = today_str
 
-# 2. Market Feeds: SET50, DELTA Decoupler
+# 2. Market Feeds: SET50, DELTA Decoupler & Prior Levels
 delta_pct = 0.0
 s50_price = 0.0
+pdh = 0.0
+pdl = 0.0
+pdc = 0.0
 
 try:
     s50_df = yf.download("^SET50", period="1mo", interval="1d", progress=False)
     if s50_df is not None and not s50_df.empty:
         c = s50_df["Close"].iloc[:, 0].dropna() if isinstance(s50_df.columns, pd.MultiIndex) else s50_df["Close"].dropna()
+        h = s50_df["High"].iloc[:, 0].dropna() if isinstance(s50_df.columns, pd.MultiIndex) else s50_df["High"].dropna()
+        l = s50_df["Low"].iloc[:, 0].dropna() if isinstance(s50_df.columns, pd.MultiIndex) else s50_df["Low"].dropna()
         if len(c) > 0:
             s50_price = float(c.iloc[-1])
+        if len(c) >= 2:
+            pdc = float(c.iloc[-2])
+            pdh = float(h.iloc[-2])
+            pdl = float(l.iloc[-2])
 except Exception:
     pass
 
@@ -77,12 +83,20 @@ try:
 except Exception:
     pass
 
+# Determine if this is the Pre-Open 09:35 Wick Scalp Scan
+is_pre_open_scan = (bkk_now.hour == 9 and bkk_now.minute < 45)
+
+# Calculate Estimated Value Area Extremes for Auction Fades
+poc_est = (pdh + pdl + pdc) / 3.0 if (pdh and pdl and pdc) else s50_price
+vah_est = pdh if pdh > 0 else s50_price + 3.0
+val_est = pdl if pdl > 0 else s50_price - 3.0
+
 # 3. Process State Machine & Breakeven Ratchets
 t_state = state["engine_t"]
 status = t_state.get("status", "FLAT")
 alert_lines = []
 
-if status != "FLAT" and s50_price > 0:
+if status != "FLAT" and s50_price > 0 and not is_pre_open_scan:
     entry = t_state.get("entry_price", 0.0)
     direction = t_state.get("direction", "BUY")
     t1 = t_state.get("t1_target", 0.0)
@@ -137,19 +151,41 @@ except Exception as e:
 
 # 5. Build Telegram Status Card
 delta_flag = "⚠️ DECOUPLED" if abs(delta_pct) >= 1.5 else "✅ Normal"
-msg = (
-    "🇹🇭 <b>[C2C ENGINE T: S50 TACTICAL MONITOR]</b>\n"
-    f"📅 <b>Time:</b> <code>{html.escape(bkk_time_str)} BKK</code>\n"
-    "━━━━━━━━━━━━━━━━━━\n"
-    f"• <b>SET50 Level:</b> <code>{s50_price:.2f} pts</code>\n"
-    f"• <b>DELTA Movement:</b> <code>{delta_pct:+.2f}%</code> ({delta_flag})\n"
-    f"• <b>Active State:</b> <b>{html.escape(t_state.get('status', 'FLAT'))}</b>\n"
-    f"• <b>Open Contracts:</b> <code>{t_state.get('contracts_open', 0)}</code> | "
-    f"<b>Direction:</b> <code>{html.escape(str(t_state.get('direction', 'NONE')))}</code>\n"
-    f"• <b>Active Stop:</b> <code>{t_state.get('current_stop', 0.0):.1f}</code> | "
-    f"<b>Pyramid Eligible:</b> {'🟢 YES' if t_state.get('pyramid_eligible') else '⚪ NO'}\n"
-    "━━━━━━━━━━━━━━━━━━\n"
-)
+
+if is_pre_open_scan:
+    # PRE-OPEN AUCTION WICK BRIEFING
+    msg = (
+        "🌅 <b>[ENGINE T: 09:45 MORNING AUCTION WICK PREP]</b>\n"
+        f"📅 <b>Time:</b> <code>{html.escape(bkk_time_str)} BKK</code>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"• <b>Prior Close (PDC):</b> <code>{pdc:.2f} pts</code>\n"
+        f"• <b>Prior High (PDH / VAH):</b> <code>{vah_est:.2f} pts</code>\n"
+        f"• <b>Prior Low (PDL / VAL):</b> <code>{val_est:.2f} pts</code>\n"
+        f"• <b>DELTA Decoupler:</b> <code>{delta_pct:+.2f}%</code> ({delta_flag})\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "🎯 <b>AUCTION WICK STAGING (09:45–10:00 BKK):</b>\n"
+        f"• <b>Long Wick Fade:</b> Limit Buy at <b>{val_est:.1f}</b> | Stop: {val_est - 2.0:.1f} (-2.0 pts)\n"
+        f"• <b>Short Wick Fade:</b> Limit Short at <b>{vah_est:.1f}</b> | Stop: {vah_est + 2.0:.1f} (+2.0 pts)\n"
+        "• <b>Target:</b> Bank +2.0 to +3.0 pts into initial wick rebound.\n"
+        "• <b>⚠️ 09:58 BKK HARD LOCK:</b> Bank or move stop to exact BE before cash equity open at 10:00!\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "<i>Next Check: 10:15 BKK (15M MSS Trend Confirmation)</i>"
+    )
+else:
+    # REGULAR TACTICAL MONITOR
+    msg = (
+        "🇹🇭 <b>[C2C ENGINE T: S50 TACTICAL MONITOR]</b>\n"
+        f"📅 <b>Time:</b> <code>{html.escape(bkk_time_str)} BKK</code>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"• <b>SET50 Level:</b> <code>{s50_price:.2f} pts</code>\n"
+        f"• <b>DELTA Movement:</b> <code>{delta_pct:+.2f}%</code> ({delta_flag})\n"
+        f"• <b>Active State:</b> <b>{html.escape(t_state.get('status', 'FLAT'))}</b>\n"
+        f"• <b>Open Contracts:</b> <code>{t_state.get('contracts_open', 0)}</code> | "
+        f"<b>Direction:</b> <code>{html.escape(str(t_state.get('direction', 'NONE')))}</code>\n"
+        f"• <b>Active Stop:</b> <code>{t_state.get('current_stop', 0.0):.1f}</code> | "
+        f"<b>Pyramid Eligible:</b> {'🟢 YES' if t_state.get('pyramid_eligible') else '⚪ NO'}\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+    )
 
 if alert_lines:
     msg += "\n".join(alert_lines) + "\n━━━━━━━━━━━━━━━━━━\n"
