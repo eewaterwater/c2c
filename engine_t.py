@@ -16,7 +16,7 @@ bkk_time_str = bkk_now.strftime("%Y-%m-%d %H:%M:%S")
 today_str = bkk_now.strftime("%Y-%m-%d")
 is_friday = (bkk_now.weekday() == 4)
 
-# 1. State Machine Load & Resilient Key Initialization
+# 1. State Machine Load & Initialization
 state_file = "state.json"
 state = {}
 
@@ -52,7 +52,7 @@ if state["circuit_breakers"].get("date") != today_str:
     state["circuit_breakers"]["daily_stopouts"] = 0
     state["circuit_breakers"]["date"] = today_str
 
-# 2. Resilient OHLC Extraction Function
+# 2. Resilient OHLC Extraction
 def get_clean_ohlc(ticker_sym):
     try:
         df = yf.download(ticker_sym, period="1mo", interval="1d", progress=False)
@@ -78,7 +78,6 @@ def get_clean_ohlc(ticker_sym):
         print(f"Error fetching {ticker_sym}: {e}")
         return 0.0, 0.0, 0.0, 0.0
 
-# Fetch SET50 Index Data
 s50_price, pdc, pdh, pdl = get_clean_ohlc("^SET50.BK")
 active_ticker = "^SET50.BK"
 
@@ -94,7 +93,7 @@ poc_est = round((pdh + pdl + pdc) / 3.0, 2)
 vah_est = pdh
 val_est = pdl
 
-# Check DELTA Decoupler
+# DELTA Decoupler Check
 delta_pct = 0.0
 try:
     d_curr, d_prev, _, _ = get_clean_ohlc("DELTA.BK")
@@ -105,24 +104,12 @@ except Exception as e:
 
 is_pre_open_scan = (bkk_now.hour == 9 and bkk_now.minute < 45)
 
-# 3. 5-Gate Institutional Matrix & Signal Generation
-# Gate 1: DELTA Decoupler Gate (< 1.5% divergence)
+# 3. 5-Gate Matrix & Signal Generation
 gate_delta = abs(delta_pct) < 1.5
-
-# Gate 2: Trend Alignment (Price vs POC/Prior Close)
 gate_trend_dir = "LONG" if s50_price >= poc_est else "SHORT"
-
-# Gate 3: Zone of Interest (ZOI) / Anti-Chase Buffer (Within 3.5 pts of POC or Support/Resistance)
-dist_from_poc = abs(s50_price - poc_est)
-gate_zoi = dist_from_poc <= 4.0
-
-# Gate 4: Circuit Breaker Gate (Daily stops < 2)
 gate_cb = state["circuit_breakers"].get("daily_stopouts", 0) < 2
-
-# Overall Gate Matrix
 gates_cleared = gate_delta and gate_cb
 
-# Trade Sizing Parameters (1R = 10,000 THB / 5 pts on 10 contracts)
 contracts = 10
 action_card = []
 settrade_block = ""
@@ -163,7 +150,7 @@ if gates_cleared and state["engine_t"].get("status") == "FLAT" and not is_pre_op
         ]
         settrade_block = f"<code>OPEN SHORT S50Z26 @ {entry_pt:.1f} | Vol: {contracts} | Stop: {stop_pt:.1f}</code>"
 
-# 4. State Machine & Breakeven Ratchets
+# 4. State Updates & Ratchets
 t_state = state["engine_t"]
 status = t_state.get("status", "FLAT")
 alert_lines = []
@@ -210,7 +197,6 @@ if is_friday and bkk_now.hour >= 16 and status == "ACTIVE_INITIAL":
         "• Playbook Rule: <b>Flatten all open contracts before 16:30 BKK</b> to eliminate unhedged weekend gap risk."
     )
 
-# Save Persistent State Machine
 t_state["last_update"] = bkk_time_str
 state["engine_t"] = t_state
 try:
@@ -219,7 +205,7 @@ try:
 except Exception as e:
     print(f"Error saving state: {e}")
 
-# 5. Build Telegram Status Card
+# 5. Build Status Card
 delta_flag = "⚠️ DECOUPLED" if abs(delta_pct) >= 1.5 else "✅ Normal"
 
 if is_pre_open_scan:
