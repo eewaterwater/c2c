@@ -1,14 +1,14 @@
-name: C2C Engine E (US Equities & DR Scanner)
+name: C2C Engine E (Equities & US DR Scanner)
 
 on:
   schedule:
-    - cron: '45 12 * * 1-5'   # 19:45 BKK Pre-Market Prep
-    - cron: '15 13 * * 1-5'   # 20:15 BKK Market Open Alignment
-    - cron: '30 20 * * 1-5'   # 03:30 BKK US Close Audit
+    - cron: '45 12 * * 1-5'   # 19:45 BKK - Evening Pre-Market Prep Scan
+    - cron: '15 13 * * 1-5'   # 20:15 BKK - Market Open Alignment Scan
+    - cron: '30 20 * * 1-5'   # 03:30 BKK - US Cash Close Audit
   workflow_dispatch:
     inputs:
-      outcome:
-        description: 'Trade Outcome to Record (win, stopout, reset, none)'
+      trade_outcome:
+        description: 'Trade Outcome (none, win, stopout, reset)'
         required: false
         default: 'none'
 
@@ -23,6 +23,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: main
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -38,7 +39,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           EVENT_NAME: ${{ github.event_name }}
-          INPUT_OUTCOME: ${{ github.event.inputs.outcome || 'none' }}
+          INPUT_OUTCOME: ${{ github.event.inputs.trade_outcome }}
         run: python engine_e.py
 
       - name: Auto-Commit Persistent State
@@ -46,4 +47,8 @@ jobs:
           git config --global user.name "C2C State Engine"
           git config --global user.email "bot@code2cash.internal"
           git add state.json
-          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: persist engine_e state [skip ci]" && git push)
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: persist engine_e state [skip ci]"
+            git pull --rebase origin main
+            git push origin main
+          fi
