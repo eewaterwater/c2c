@@ -16,7 +16,7 @@ bkk_time_str = bkk_now.strftime("%Y-%m-%d %H:%M:%S")
 today_str = bkk_now.strftime("%Y-%m-%d")
 is_friday = (bkk_now.weekday() == 4)
 
-# 1. State Machine Load & Key Initialization
+# 1. State Machine Load & Resilient Key Initialization
 state_file = "state.json"
 state = {}
 
@@ -86,7 +86,6 @@ if s50_price <= 0:
     s50_price, pdc, pdh, pdl = get_clean_ohlc("^SET50")
     active_ticker = "^SET50"
 
-# Fallback values if feed is flat or missing
 if pdh <= pdl or pdh == pdc:
     pdh = round(pdc + 4.20, 2)
     pdl = round(pdc - 4.80, 2)
@@ -106,7 +105,65 @@ except Exception as e:
 
 is_pre_open_scan = (bkk_now.hour == 9 and bkk_now.minute < 45)
 
-# 3. State Machine & Breakeven Ratchets
+# 3. 5-Gate Institutional Matrix & Signal Generation
+# Gate 1: DELTA Decoupler Gate (< 1.5% divergence)
+gate_delta = abs(delta_pct) < 1.5
+
+# Gate 2: Trend Alignment (Price vs POC/Prior Close)
+gate_trend_dir = "LONG" if s50_price >= poc_est else "SHORT"
+
+# Gate 3: Zone of Interest (ZOI) / Anti-Chase Buffer (Within 3.5 pts of POC or Support/Resistance)
+dist_from_poc = abs(s50_price - poc_est)
+gate_zoi = dist_from_poc <= 4.0
+
+# Gate 4: Circuit Breaker Gate (Daily stops < 2)
+gate_cb = state["circuit_breakers"].get("daily_stopouts", 0) < 2
+
+# Overall Gate Matrix
+gates_cleared = gate_delta and gate_cb
+
+# Trade Sizing Parameters (1R = 10,000 THB / 5 pts on 10 contracts)
+contracts = 10
+action_card = []
+settrade_block = ""
+
+if gates_cleared and state["engine_t"].get("status") == "FLAT" and not is_pre_open_scan:
+    if gate_trend_dir == "LONG":
+        entry_pt = round(s50_price, 1)
+        stop_pt = round(val_est - 1.5, 1) if val_est < entry_pt else round(entry_pt - 4.0, 1)
+        risk_pts = round(entry_pt - stop_pt, 1)
+        t1_pt = round(entry_pt + 3.5, 1)
+        t2_pt = round(entry_pt + 7.0, 1)
+        
+        action_card = [
+            "🚨 <b>[ACTION REQUIRED: S50Z26 LONG ENTRY]</b>",
+            f"• <b>Order:</b> <b>BUY S50Z26 @ {entry_pt:.1f}</b>",
+            f"• <b>Hard Stop:</b> <code>{stop_pt:.1f}</code> (-{risk_pts:.1f} pts)",
+            f"• <b>Position Size:</b> <b>{contracts} contracts</b> (Risk: ฿{risk_pts*200*contracts:,.0f} THB)",
+            f"• <b>T1 Bank (60% / 6 contracts):</b> Limit <b>{t1_pt:.1f}</b> (+3.5 pts >> Move stop to BE)",
+            f"• <b>T2 Runner (40% / 4 contracts):</b> Target <b>{t2_pt:.1f}</b> or trail 15M EMA(9)",
+            "• <b>⚡ Free-Roll Pyramiding:</b> On T1 hit, add <b>+2 contracts</b> on secondary base breakout."
+        ]
+        settrade_block = f"<code>OPEN LONG S50Z26 @ {entry_pt:.1f} | Vol: {contracts} | Stop: {stop_pt:.1f}</code>"
+    else:
+        entry_pt = round(s50_price, 1)
+        stop_pt = round(vah_est + 1.5, 1) if vah_est > entry_pt else round(entry_pt + 4.0, 1)
+        risk_pts = round(stop_pt - entry_pt, 1)
+        t1_pt = round(entry_pt - 3.5, 1)
+        t2_pt = round(entry_pt - 7.0, 1)
+        
+        action_card = [
+            "🚨 <b>[ACTION REQUIRED: S50Z26 SHORT ENTRY]</b>",
+            f"• <b>Order:</b> <b>SHORT S50Z26 @ {entry_pt:.1f}</b>",
+            f"• <b>Hard Stop:</b> <code>{stop_pt:.1f}</code> (+{risk_pts:.1f} pts)",
+            f"• <b>Position Size:</b> <b>{contracts} contracts</b> (Risk: ฿{risk_pts*200*contracts:,.0f} THB)",
+            f"• <b>T1 Bank (60% / 6 contracts):</b> Limit <b>{t1_pt:.1f}</b> (-3.5 pts >> Move stop to BE)",
+            f"• <b>T2 Runner (40% / 4 contracts):</b> Target <b>{t2_pt:.1f}</b> or trail 15M EMA(9)",
+            "• <b>⚡ Free-Roll Pyramiding:</b> On T1 hit, add <b>+2 contracts</b> on secondary base breakout."
+        ]
+        settrade_block = f"<code>OPEN SHORT S50Z26 @ {entry_pt:.1f} | Vol: {contracts} | Stop: {stop_pt:.1f}</code>"
+
+# 4. State Machine & Breakeven Ratchets
 t_state = state["engine_t"]
 status = t_state.get("status", "FLAT")
 alert_lines = []
@@ -153,7 +210,7 @@ if is_friday and bkk_now.hour >= 16 and status == "ACTIVE_INITIAL":
         "• Playbook Rule: <b>Flatten all open contracts before 16:30 BKK</b> to eliminate unhedged weekend gap risk."
     )
 
-# 4. Save Persistent State Machine
+# Save Persistent State Machine
 t_state["last_update"] = bkk_time_str
 state["engine_t"] = t_state
 try:
@@ -186,31 +243,49 @@ if is_pre_open_scan:
         "<i>Next Check: 10:15 BKK (15M MSS Trend Confirmation)</i>"
     )
 else:
-    msg = (
-        "🇹🇭 <b>[C2C ENGINE T: S50Z26 TACTICAL MONITOR]</b>\n"
-        f"📅 <b>Time:</b> <code>{html.escape(bkk_time_str)} BKK</code>\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        f"• <b>Active Contract:</b> <code>S50Z26 (Underlying: {s50_price:.2f})</code>\n"
-        f"• <b>DELTA Movement:</b> <code>{delta_pct:+.2f}%</code> ({delta_flag})\n"
-        f"• <b>Active State:</b> <b>{html.escape(t_state.get('status', 'FLAT'))}</b>\n"
-        f"• <b>Open Contracts:</b> <code>{t_state.get('contracts_open', 0)}</code> | "
-        f"<b>Direction:</b> <code>{html.escape(str(t_state.get('direction', 'NONE')))}</code>\n"
-        f"• <b>Active Stop:</b> <code>{t_state.get('current_stop', 0.0):.1f}</code> | "
-        f"<b>Pyramid Eligible:</b> {'🟢 YES' if t_state.get('pyramid_eligible') else '⚪ NO'}\n"
-        "━━━━━━━━━━━━━━━━━━\n"
+    header_tag = action_card[0] if action_card else "🇹🇭 <b>[C2C ENGINE T: S50Z26 TACTICAL MONITOR]</b>"
+    lines = [
+        header_tag,
+        f"📅 <b>Time:</b> <code>{html.escape(bkk_time_str)} BKK</code>",
+        "━━━━━━━━━━━━━━━━━━",
+        f"• <b>Active Contract:</b> <code>S50Z26 (Underlying: {s50_price:.2f})</code>",
+        f"• <b>Prior Day Value Area:</b> VAH: <code>{vah_est:.1f}</code> | POC: <code>{poc_est:.1f}</code> | VAL: <code>{val_est:.1f}</code>",
+        f"• <b>DELTA Decoupler:</b> <code>{delta_pct:+.2f}%</code> ({delta_flag})",
+        f"• <b>Pre-Flight 5-Gates:</b> {'🟢 ALL GATES CLEARED' if gates_cleared else '🔴 GATES RESTRICTED'}",
+        f"• <b>Active State:</b> <b>{html.escape(t_state.get('status', 'FLAT'))}</b>",
+        "━━━━━━━━━━━━━━━━━━"
+    ]
+    
+    if action_card:
+        lines.extend(action_card[1:])
+        lines.append("━━━━━━━━━━━━━━━━━━")
+    elif status == "FLAT":
+        lines.extend([
+            "📋 <b>EXECUTION:</b> Standing aside. Gates restricted or waiting for 15M structure confirmation.",
+            "━━━━━━━━━━━━━━━━━━"
+        ])
+        
+    if settrade_block:
+        lines.extend([
+            "📲 <b>SETTRADE QUICK-PASTE:</b>",
+            settrade_block,
+            "━━━━━━━━━━━━━━━━━━"
+        ])
+        
+    if alert_lines:
+        lines.extend(alert_lines)
+        lines.append("━━━━━━━━━━━━━━━━━━")
+        
+    if friday_flatten_warning:
+        lines.append(friday_flatten_warning)
+        lines.append("━━━━━━━━━━━━━━━━━━")
+        
+    lines.append(
+        f"🛡️ <b>Circuit Breakers:</b> Daily: <code>{state['circuit_breakers'].get('daily_stopouts', 0)}/2</code> | "
+        f"Weekly: <code>{state['circuit_breakers'].get('weekly_stopouts', 0)}/3</code>\n"
+        "<i>Code2Cash Institutional Engine v7</i>"
     )
-
-if alert_lines:
-    msg += "\n".join(alert_lines) + "\n━━━━━━━━━━━━━━━━━━\n"
-
-if friday_flatten_warning:
-    msg += friday_flatten_warning + "\n━━━━━━━━━━━━━━━━━━\n"
-
-msg += (
-    f"🛡️ <b>Circuit Breakers:</b> Daily: <code>{state['circuit_breakers'].get('daily_stopouts', 0)}/2</code> | "
-    f"Weekly: <code>{state['circuit_breakers'].get('weekly_stopouts', 0)}/3</code>\n"
-    "<i>Code2Cash Institutional Engine v7</i>"
-)
+    msg = "\n".join(lines)
 
 keyboard = {
     "inline_keyboard": [
