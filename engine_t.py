@@ -52,58 +52,57 @@ if state["circuit_breakers"].get("date") != today_str:
     state["circuit_breakers"]["daily_stopouts"] = 0
     state["circuit_breakers"]["date"] = today_str
 
-# 2. Reliable Market Feeds: ^SET50.BK & DELTA.BK
-def extract_ohlc(df):
-    if df is None or df.empty:
-        return 0.0, 0.0, 0.0, 0.0
+# 2. Resilient OHLC Extraction Function
+def get_clean_ohlc(ticker_sym):
     try:
-        c = df["Close"].iloc[:, 0].dropna() if isinstance(df.columns, pd.MultiIndex) else df["Close"].dropna()
-        h = df["High"].iloc[:, 0].dropna() if isinstance(df.columns, pd.MultiIndex) else df["High"].dropna()
-        l = df["Low"].iloc[:, 0].dropna() if isinstance(df.columns, pd.MultiIndex) else df["Low"].dropna()
-        if len(c) == 0:
+        df = yf.download(ticker_sym, period="1mo", interval="1d", progress=False)
+        if df is None or df.empty:
             return 0.0, 0.0, 0.0, 0.0
-        curr = float(c.iloc[-1])
-        prev_c = float(c.iloc[-2]) if len(c) >= 2 else curr
-        prev_h = float(h.iloc[-2]) if len(h) >= 2 else curr
-        prev_l = float(l.iloc[-2]) if len(l) >= 2 else curr
-        return curr, prev_c, prev_h, prev_l
+        
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+            
+        df = df.dropna(subset=["Close", "High", "Low"])
+        if len(df) == 0:
+            return 0.0, 0.0, 0.0, 0.0
+            
+        curr_close = float(df["Close"].iloc[-1])
+        prev_row = df.iloc[-2] if len(df) >= 2 else df.iloc[-1]
+        
+        prev_close = float(prev_row["Close"])
+        prev_high = float(prev_row["High"])
+        prev_low = float(prev_row["Low"])
+        
+        return curr_close, prev_close, prev_high, prev_low
     except Exception as e:
-        print(f"OHLC extraction error: {e}")
+        print(f"Error fetching {ticker_sym}: {e}")
         return 0.0, 0.0, 0.0, 0.0
 
-s50_price, pdc, pdh, pdl = 0.0, 0.0, 0.0, 0.0
+# Fetch SET50 Index Data
+s50_price, pdc, pdh, pdl = get_clean_ohlc("^SET50.BK")
 active_ticker = "^SET50.BK"
 
-# Prioritize ^SET50.BK, fallback to ^SET50 if ever needed
-for t_sym in ["^SET50.BK", "^SET50"]:
-    try:
-        df_feed = yf.download(t_sym, period="1mo", interval="1d", progress=False)
-        p, c, h, l = extract_ohlc(df_feed)
-        if p > 0:
-            s50_price, pdc, pdh, pdl = p, c, h, l
-            active_ticker = t_sym
-            break
-    except Exception as e:
-        print(f"Error fetching {t_sym}: {e}")
+if s50_price <= 0:
+    s50_price, pdc, pdh, pdl = get_clean_ohlc("^SET50")
+    active_ticker = "^SET50"
+
+# Fallback values if feed is flat or missing
+if pdh <= pdl or pdh == pdc:
+    pdh = round(pdc + 4.20, 2)
+    pdl = round(pdc - 4.80, 2)
+
+poc_est = round((pdh + pdl + pdc) / 3.0, 2)
+vah_est = pdh
+val_est = pdl
 
 # Check DELTA Decoupler
 delta_pct = 0.0
 try:
-    delta_df = yf.download("DELTA.BK", period="1mo", interval="1d", progress=False)
-    p_d, c_d, _, _ = extract_ohlc(delta_df)
-    if c_d > 0 and p_d > 0:
-        delta_pct = ((p_d - c_d) / c_d) * 100.0
+    d_curr, d_prev, _, _ = get_clean_ohlc("DELTA.BK")
+    if d_prev > 0 and d_curr > 0:
+        delta_pct = ((d_curr - d_prev) / d_prev) * 100.0
 except Exception as e:
     print(f"DELTA error: {e}")
-
-if s50_price <= 0:
-    print("FATAL: SET50 feed offline. Standing down.")
-    sys.exit(0)
-
-# Typical front-month basis is near parity or +/- 1-2 points
-poc_est = (pdh + pdl + pdc) / 3.0
-vah_est = pdh
-val_est = pdl
 
 is_pre_open_scan = (bkk_now.hour == 9 and bkk_now.minute < 45)
 
@@ -112,7 +111,7 @@ t_state = state["engine_t"]
 status = t_state.get("status", "FLAT")
 alert_lines = []
 
-if status != "FLAT" and not is_pre_open_scan:
+if status != "FLAT" and not is_pre_open_scan and s50_price > 0:
     entry = t_state.get("entry_price", 0.0)
     direction = t_state.get("direction", "BUY")
     t1 = t_state.get("t1_target", 0.0)
@@ -223,9 +222,12 @@ keyboard = {
 }
 
 if token and chat_id:
-    res = requests.post(
-        f"https://api.telegram.org/bot{token}/sendMessage",
-        json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML", "reply_markup": keyboard},
-        timeout=15
-    )
-    print(f"Engine T cycle completed. Status: {res.status_code}")
+    try:
+        res = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML", "reply_markup": keyboard},
+            timeout=15
+        )
+        print(f"Engine T cycle completed. Status: {res.status_code}")
+    except Exception as e:
+        print(f"Telegram network exception: {e}")
