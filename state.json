@@ -7,7 +7,7 @@
   "circuit_breakers": {
     "daily_stopouts": 0,
     "weekly_stopouts": 0,
-    "date": "2026-10-28"
+    "date": "2026-10-29"
   },
   "engine_t": {
     "status": "FLAT",
@@ -19,6 +19,6 @@
     "contracts_open": 0,
     "t1_banked_pts": 0.0,
     "pyramid_eligible": false,
-    "last_update": "2026-10-28 16:56:01"
+    "last_update": "2026-10-29 10:17:34"
   }
 }
