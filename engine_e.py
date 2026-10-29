@@ -24,9 +24,7 @@ AVAILABLE_CASH_THB = 113000.0
 MEGA_CAP_EARNINGS_WATCHLIST = ["MSFT", "AAPL", "NVDA", "AMZN", "GOOGL", "META"]
 INDEX_PROXIES = ["QQQ", "SPY", "SOXX", "SMH", "XLK"]
 
-# ==============================================================================
-# 1. STATE MACHINE MANAGEMENT
-# ==============================================================================
+# 1. State Maintenance
 state_path = "state.json"
 state = {
     "consecutive_wins": 0,
@@ -63,7 +61,7 @@ try:
     with open(state_path, "w") as f:
         json.dump(state, f, indent=2)
 except Exception as e:
-    print(f"Warning saving state.json: {e}")
+    print(f"Warning saving state: {e}")
 
 circuit_breaker_active = False
 circuit_reason = ""
@@ -77,9 +75,7 @@ elif state.get("weekly_stopouts", 0) >= 3:
 win_streak = state.get("consecutive_wins", 0)
 streak_boost = win_streak >= 3
 
-# ==============================================================================
-# 2. MARKET CALENDAR CHECK
-# ==============================================================================
+# 2. Market Calendar
 is_us_open_today = True
 try:
     import exchange_calendars as xcals
@@ -91,7 +87,7 @@ except Exception:
 notice_header = ""
 if not is_us_open_today:
     if event_name == "schedule":
-        print("Market closed & schedule trigger. Standing down cleanly.")
+        print("Market closed & schedule trigger. Standing down.")
         sys.exit(0)
     else:
         notice_header = "⚠️ <b>[TEST RUN: US Market Closed - Using Prior Close Data]</b>\n"
@@ -106,9 +102,7 @@ def safe_series(df, col="Close"):
     except Exception:
         return np.array([])
 
-# ==============================================================================
-# 3. MACRO FEEDS & BENCHMARKS
-# ==============================================================================
+# 3. Macro Feeds
 usd_thb = 35.0
 try:
     thb_df = yf.download("THB=X", period="5d", interval="1d", progress=False)
@@ -129,31 +123,22 @@ except Exception:
 
 vix_elevated = vix_val > 28.0
 
-def calc_benchmark_returns(sym):
+def calc_bench_rets(sym):
     try:
         df = yf.download(sym, period="1mo", interval="1d", progress=False)
         c = safe_series(df, "Close")
         if len(c) >= 11:
-            ret_3d = ((float(c[-1]) - float(c[-4])) / float(c[-4])) * 100.0
-            ret_10d = ((float(c[-1]) - float(c[-11])) / float(c[-11])) * 100.0
-            return ret_3d, ret_10d
+            return ((float(c[-1]) - float(c[-4])) / float(c[-4])) * 100.0, ((float(c[-1]) - float(c[-11])) / float(c[-11])) * 100.0
     except Exception:
         pass
     return 0.0, 0.0
 
-qqq_3d, qqq_10d = calc_benchmark_returns("QQQ")
-smh_3d, smh_10d = calc_benchmark_returns("SMH")
-xlk_3d, xlk_10d = calc_benchmark_returns("XLK")
+qqq_3d, qqq_10d = calc_bench_rets("QQQ")
+smh_3d, smh_10d = calc_bench_rets("SMH")
+xlk_3d, xlk_10d = calc_bench_rets("XLK")
+bench_returns = {"QQQ": (qqq_3d, qqq_10d), "SMH": (smh_3d, smh_10d), "XLK": (xlk_3d, xlk_10d)}
 
-bench_returns = {
-    "QQQ": (qqq_3d, qqq_10d),
-    "SMH": (smh_3d, smh_10d),
-    "XLK": (xlk_3d, xlk_10d)
-}
-
-# ==============================================================================
-# 4. 4-REGIME CLASSIFICATION
-# ==============================================================================
+# 4. Regime Classification (QQQ)
 regime_id = 3
 regime_name = "Regime 3: Rangebound Chop"
 regime_icon = "🟡"
@@ -212,3 +197,120 @@ try:
             regime_id = 3
             regime_name = "Regime 3: Rangebound Chop"
             regime_icon = "🟡"
+            r_thb = 15000.0
+            r_label = "0.50R (฿15,000 THB)"
+            vault_a_alloc = "35% QQQ / 25% SMH / 40% SGOV"
+except Exception as e:
+    print(f"Macro regime error: {e}")
+
+if circuit_breaker_active:
+    r_thb = 0.0
+    r_label = f"0.0R (HALTED: {circuit_reason})"
+    risk_authorized = False
+
+# 5. Risk Gates & Earnings Blackout Logic
+def is_earnings_blackout(ticker_symbol: str, blackout_days: int = 5) -> bool:
+    try:
+        ticker = yf.Ticker(ticker_symbol.strip().upper())
+        cal = ticker.calendar
+        if cal is None:
+            return False
+        dates = []
+        if isinstance(cal, dict):
+            dates = cal.get("Earnings Date", [])
+        elif hasattr(cal, "T") and "Earnings Date" in cal.T.columns:
+            dates = cal.T["Earnings Date"].tolist()
+        elif isinstance(cal, pd.DataFrame) and "Earnings Date" in cal.index:
+            dates = cal.loc["Earnings Date"].tolist()
+        if not dates:
+            return False
+        first_date = dates[0]
+        next_earn = first_date.date() if hasattr(first_date, "date") else first_date
+        today = datetime.now(timezone.utc).date()
+        diff = (next_earn - today).days
+        return 0 <= diff <= blackout_days
+    except Exception:
+        return False
+
+def is_index_blackout(etf_symbol: str) -> bool:
+    if etf_symbol.strip().upper() not in INDEX_PROXIES:
+        return False
+    for mega in MEGA_CAP_EARNINGS_WATCHLIST:
+        if is_earnings_blackout(mega, blackout_days=2):
+            return True
+    return False
+
+def passes_all_buy_gates(symbol: str, setup_type: str = "BREAKOUT", regime: int = 2) -> bool:
+    if regime == 2 and setup_type.upper() == "BREAKOUT":
+        return False
+    if is_earnings_blackout(symbol, blackout_days=5):
+        return False
+    if is_index_blackout(symbol):
+        return False
+    return True
+
+# 6. Core ETF & Vault A Structural Monitor
+core_etfs = [
+    {"symbol": "SMH",  "role": "Semiconductor Alpha / Vault A (35%)"},
+    {"symbol": "QQQM", "role": "Nasdaq-100 Core / Vault A (55%)"},
+    {"symbol": "VOO",  "role": "S&P 500 Broad Market Macro Anchor"}
+]
+
+etf_monitor_lines = []
+for item in core_etfs:
+    sym = item["symbol"]
+    role = item["role"]
+    try:
+        etf_df = yf.download(sym, period="1y", interval="1d", progress=False)
+        c_etf = safe_series(etf_df, "Close")
+        if len(c_etf) >= 200:
+            p_cur = float(c_etf[-1])
+            s_etf = pd.Series(c_etf)
+            ema21_etf = float(s_etf.ewm(span=21, adjust=False).mean().iloc[-1])
+            sma200_etf = float(s_etf.rolling(200).mean().iloc[-1])
+            dist_21 = ((p_cur - ema21_etf) / ema21_etf) * 100.0
+            dist_200 = ((p_cur - sma200_etf) / sma200_etf) * 100.0
+            trend_status = "🟢 Bullish" if p_cur >= ema21_etf and dist_200 > 0 else (
+                "🟡 Pullback" if p_cur < ema21_etf and dist_200 > 0 else "🔴 Bearish"
+            )
+            etf_monitor_lines.append(
+                f"• <b>{sym}</b> (${p_cur:.2f}): {trend_status}\n"
+                f"   └ 21 EMA: <code>{dist_21:+.1f}%</code> | 200 SMA: <code>{dist_200:+.1f}%</code> | <i>{role}</i>"
+            )
+    except Exception as e:
+        print(f"Error ETF {sym}: {e}")
+
+# 7. Active Watchpool Scanner
+watchpool = [
+    {"ticker": "NVDA",  "dr": "NVDA80X",   "ratio": 200,   "tier": "HIGH_BETA", "bench": "SMH", "is_etf": False},
+    {"ticker": "PLTR",  "dr": "PLTR01",    "ratio": 1100,  "tier": "HIGH_BETA", "bench": "XLK", "is_etf": False},
+    {"ticker": "TSLA",  "dr": "TSLA80X",   "ratio": 5000,  "tier": "HIGH_BETA", "bench": "QQQ", "is_etf": False},
+    {"ticker": "AMD",   "dr": "AMD80X",    "ratio": 5000,  "tier": "HIGH_BETA", "bench": "SMH", "is_etf": False},
+    {"ticker": "COIN",  "dr": "COIN01",    "ratio": 2000,  "tier": "HIGH_BETA", "bench": "QQQ", "is_etf": False},
+    {"ticker": "ALAB",  "dr": "ALAB01",    "ratio": 1000,  "tier": "HIGH_BETA", "bench": "SMH", "is_etf": False},
+    {"ticker": "MU",    "dr": "MICRON01",  "ratio": 1000,  "tier": "HIGH_BETA", "bench": "SMH", "is_etf": False},
+    {"ticker": "SOXX",  "dr": "SOXX23",    "ratio": 100,   "tier": "HIGH_BETA", "bench": "SMH", "is_etf": True},
+    {"ticker": "AAPL",  "dr": "AAPL80X",   "ratio": 1000,  "tier": "MEGA_CORE", "bench": "XLK", "is_etf": False},
+    {"ticker": "MSFT",  "dr": "MSFT80X",   "ratio": 1000,  "tier": "MEGA_CORE", "bench": "XLK", "is_etf": False},
+    {"ticker": "GOOGL", "dr": "GOOG80X",   "ratio": 500,   "tier": "MEGA_CORE", "bench": "QQQ", "is_etf": False},
+    {"ticker": "META",  "dr": "META80X",   "ratio": 1000,  "tier": "MEGA_CORE", "bench": "QQQ", "is_etf": False},
+    {"ticker": "AMZN",  "dr": "AMZN80X",   "ratio": 500,   "tier": "MEGA_CORE", "bench": "QQQ", "is_etf": False},
+    {"ticker": "LLY",   "dr": "LLY80X",    "ratio": 1000,  "tier": "MEGA_CORE", "bench": "QQQ", "is_etf": False},
+    {"ticker": "ISRG",  "dr": "ISRG80",    "ratio": 1000,  "tier": "MEGA_CORE", "bench": "QQQ", "is_etf": False},
+    {"ticker": "QQQ",   "dr": "QQQ80X",    "ratio": 1000,  "tier": "MEGA_CORE", "bench": "QQQ", "is_etf": True}
+]
+
+candidates = []
+summary_lines = []
+
+for item in watchpool:
+    sym = item["ticker"]
+    dr_sym = item["dr"]
+    ratio = item["ratio"]
+    tier = item["tier"]
+    bench_sym = item["bench"]
+    is_etf = item.get("is_etf", False)
+
+    try:
+        t_obj = yf.Ticker(sym)
+        hist = t_obj
