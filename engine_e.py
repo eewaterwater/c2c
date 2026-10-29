@@ -3,7 +3,7 @@ import sys
 import json
 import html
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 import pytz
 import pandas as pd
 import numpy as np
@@ -20,7 +20,13 @@ ny_date_str = ny_now.strftime("%Y-%m-%d")
 bkk_time_str = bkk_now.strftime("%Y-%m-%d %H:%M:%S")
 is_friday = (bkk_now.weekday() == 4)
 
-# 1. State Maintenance
+AVAILABLE_CASH_THB = 113000.0
+MEGA_CAP_EARNINGS_WATCHLIST = ["MSFT", "AAPL", "NVDA", "AMZN", "GOOGL", "META"]
+INDEX_PROXIES = ["QQQ", "SPY", "SOXX", "SMH", "XLK"]
+
+# ==============================================================================
+# 1. STATE MACHINE MANAGEMENT
+# ==============================================================================
 state_path = "state.json"
 state = {
     "consecutive_wins": 0,
@@ -71,7 +77,9 @@ elif state.get("weekly_stopouts", 0) >= 3:
 win_streak = state.get("consecutive_wins", 0)
 streak_boost = win_streak >= 3
 
-# 2. Market Calendar Check
+# ==============================================================================
+# 2. MARKET CALENDAR CHECK
+# ==============================================================================
 is_us_open_today = True
 try:
     import exchange_calendars as xcals
@@ -98,7 +106,9 @@ def safe_series(df, col="Close"):
     except Exception:
         return np.array([])
 
-# 3. Macro Feeds
+# ==============================================================================
+# 3. MACRO FEEDS & BENCHMARKS
+# ==============================================================================
 usd_thb = 35.0
 try:
     thb_df = yf.download("THB=X", period="5d", interval="1d", progress=False)
@@ -141,7 +151,10 @@ bench_returns = {
     "XLK": (xlk_3d, xlk_10d)
 }
 
-# 4. Regime Classification (QQQ)
+# ==============================================================================
+# 4. 4-REGIME CLASSIFICATION
+# ==============================================================================
+regime_id = 3
 regime_name = "Regime 3: Rangebound Chop"
 regime_icon = "🟡"
 r_thb = 15000.0
@@ -167,6 +180,7 @@ try:
             is_bear_confirmed = all(c < (sma * 0.985) for c, sma in zip(recent_closes, recent_smas))
 
         if is_bear_confirmed:
+            regime_id = 4
             regime_name = "Regime 4: Structural Bear"
             regime_icon = "🔴"
             r_thb = 0.0
@@ -174,6 +188,7 @@ try:
             vault_a_alloc = "100% SGOV (0% Equities)"
             risk_authorized = False
         elif p_now > p_ema20 > p_ema50 > p_sma200:
+            regime_id = 1
             regime_name = "Regime 1: Confirmed Bull"
             regime_icon = "🟢"
             if streak_boost and not vix_elevated:
@@ -187,335 +202,9 @@ try:
                 r_label = "1.00R (฿30,000 THB)"
             vault_a_alloc = "55% QQQ / 35% SMH / 10% SGOV"
         elif p_now < p_ema20 and p_now > p_sma200:
+            regime_id = 2
             regime_name = "Regime 2: Bull Pullback"
             regime_icon = "🟠"
             r_thb = 15000.0 if vix_elevated else 22500.0
             r_label = "0.50R (฿15,000 THB) [VIX High]" if vix_elevated else "0.75R (฿22,500 THB)"
-            vault_a_alloc = "35% QQQ / 25% SMH / 40% SGOV"
-        else:
-            regime_name = "Regime 3: Rangebound Chop"
-            regime_icon = "🟡"
-            r_thb = 15000.0
-            r_label = "0.50R (฿15,000 THB)"
-            vault_a_alloc = "35% QQQ / 25% SMH / 40% SGOV"
-except Exception as e:
-    print(f"Macro error: {e}")
-
-if circuit_breaker_active:
-    r_thb = 0.0
-    r_label = f"0.0R (HALTED: {circuit_reason})"
-    risk_authorized = False
-
-# 5. Core ETF & Vault A Structural Monitor
-core_etfs = [
-    {"symbol": "SMH",  "role": "Semiconductor Alpha / Vault A (35%)"},
-    {"symbol": "QQQM", "role": "Nasdaq-100 Core / Vault A (55%)"},
-    {"symbol": "VOO",  "role": "S&P 500 Broad Market Macro Anchor"}
-]
-
-etf_monitor_lines = []
-for item in core_etfs:
-    sym = item["symbol"]
-    role = item["role"]
-    try:
-        etf_df = yf.download(sym, period="1y", interval="1d", progress=False)
-        c_etf = safe_series(etf_df, "Close")
-        if len(c_etf) >= 200:
-            p_cur = float(c_etf[-1])
-            s_etf = pd.Series(c_etf)
-            ema21_etf = float(s_etf.ewm(span=21, adjust=False).mean().iloc[-1])
-            sma200_etf = float(s_etf.rolling(200).mean().iloc[-1])
-
-            dist_21 = ((p_cur - ema21_etf) / ema21_etf) * 100.0
-            dist_200 = ((p_cur - sma200_etf) / sma200_etf) * 100.0
-
-            trend_status = "🟢 Bullish" if p_cur >= ema21_etf and dist_200 > 0 else (
-                "🟡 Pullback" if p_cur < ema21_etf and dist_200 > 0 else "🔴 Bearish"
-            )
-
-            etf_monitor_lines.append(
-                f"• <b>{sym}</b> (${p_cur:.2f}): {trend_status}\n"
-                f"   └ 21 EMA: <code>{dist_21:+.1f}%</code> | 200 SMA: <code>{dist_200:+.1f}%</code> | <i>{role}</i>"
-            )
-    except Exception as e:
-        print(f"Error ETF {sym}: {e}")
-
-# 6. Active Watchpool (US Leaders & DR/DRx)
-watchpool = [
-    {"ticker": "NVDA",  "dr": "NVDA80X",   "ratio": 200,   "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "SMH", "is_etf": False},
-    {"ticker": "PLTR",  "dr": "PLTR01",    "ratio": 1100,  "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "XLK", "is_etf": False},
-    {"ticker": "TSLA",  "dr": "TSLA80X",   "ratio": 5000,  "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "QQQ", "is_etf": False},
-    {"ticker": "AMD",   "dr": "AMD80X",    "ratio": 5000,  "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "SMH", "is_etf": False},
-    {"ticker": "COIN",  "dr": "COIN01",    "ratio": 2000,  "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "QQQ", "is_etf": False},
-    {"ticker": "ALAB",  "dr": "ALAB01",    "ratio": 1000,  "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "SMH", "is_etf": False},
-    {"ticker": "MU",    "dr": "MICRON01",  "ratio": 1000,  "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "SMH", "is_etf": False},
-    {"ticker": "SOXX",  "dr": "SOXX23",    "ratio": 100,   "exchange": "NASDAQ", "tier": "HIGH_BETA", "bench": "SMH", "is_etf": True},
-    {"ticker": "AAPL",  "dr": "AAPL80X",   "ratio": 1000,  "exchange": "NASDAQ", "tier": "MEGA_CORE", "bench": "XLK", "is_etf": False},
-    {"ticker": "MSFT",  "dr": "MSFT80X",   "ratio": 1000,  "exchange": "NASDAQ", "tier": "MEGA_CORE", "bench": "XLK", "is_etf": False},
-    {"ticker": "GOOGL", "dr": "GOOG80X",   "ratio": 500,   "exchange": "NASDAQ", "tier": "MEGA_CORE", "bench": "QQQ", "is_etf": False},
-    {"ticker": "META",  "dr": "META80X",   "ratio": 1000,  "exchange": "NASDAQ", "tier": "MEGA_CORE", "bench": "QQQ", "is_etf": False},
-    {"ticker": "AMZN",  "dr": "AMZN80X",   "ratio": 500,   "exchange": "NASDAQ", "tier": "MEGA_CORE", "bench": "QQQ", "is_etf": False},
-    {"ticker": "LLY",   "dr": "LLY80X",    "ratio": 1000,  "exchange": "NYSE",   "tier": "MEGA_CORE", "bench": "QQQ", "is_etf": False},
-    {"ticker": "ISRG",  "dr": "ISRG80",    "ratio": 1000,  "exchange": "NASDAQ", "tier": "MEGA_CORE", "bench": "QQQ", "is_etf": False},
-    {"ticker": "QQQ",   "dr": "QQQ80X",    "ratio": 1000,  "exchange": "NASDAQ", "tier": "MEGA_CORE", "bench": "QQQ", "is_etf": True}
-]
-
-candidates = []
-summary_lines = []
-
-for item in watchpool:
-    sym = item["ticker"]
-    dr_sym = item["dr"]
-    ratio = item["ratio"]
-    exchange = item["exchange"]
-    tier = item["tier"]
-    bench_sym = item["bench"]
-    is_etf = item.get("is_etf", False)
-
-    try:
-        t_obj = yf.Ticker(sym)
-        hist = t_obj.history(period="3mo", interval="1d")
-        c = safe_series(hist, "Close")
-        lows = safe_series(hist, "Low")
-        vol = safe_series(hist, "Volume")
-        if len(c) < 25:
-            continue
-
-        curr_p = float(c[-1])
-        s_c = pd.Series(c)
-        ema21 = float(s_c.ewm(span=21, adjust=False).mean().iloc[-1])
-
-        b_3d, b_10d = bench_returns.get(bench_sym, (qqq_3d, qqq_10d))
-        p_3d = float(c[-4]) if len(c) >= 4 else curr_p
-        p_10d = float(c[-11]) if len(c) >= 11 else curr_p
-        ret_3d = ((curr_p - p_3d) / p_3d) * 100.0
-        ret_10d = ((curr_p - p_10d) / p_10d) * 100.0
-
-        rs_delta_3d = ret_3d - b_3d
-        rs_delta_10d = ret_10d - b_10d
-        composite_rs = (0.60 * rs_delta_3d) + (0.40 * rs_delta_10d)
-
-        sma20 = s_c.rolling(20).mean()
-        std20 = s_c.rolling(20).std()
-        bbw = ((sma20 + 2*std20) - (sma20 - 2*std20)) / sma20 * 100.0
-        is_compressed = bool(bbw.iloc[-1] <= bbw.tail(60).quantile(0.25))
-
-        vdu_pass = True
-        if len(vol) >= 20:
-            avg_vol20 = np.mean(vol[-20:])
-            vdu_pass = (vol[-1] <= avg_vol20 * 0.85)
-
-        imminent_earn = False
-        if not is_etf:
-            try:
-                cal = t_obj.calendar
-                if cal is not None and not (isinstance(cal, pd.DataFrame) and cal.empty):
-                    dt = None
-                    if isinstance(cal, pd.DataFrame) and "Earnings Date" in cal.index:
-                        dt = pd.to_datetime(cal.loc["Earnings Date"].iloc[0])
-                    elif isinstance(cal, dict) and "Earnings Date" in cal:
-                        dt = pd.to_datetime(cal["Earnings Date"][0])
-                    if dt:
-                        dt_naive = dt.tz_localize(None) if dt.tzinfo else dt
-                        days_diff = (dt_naive - datetime.now()).days
-                        if 0 <= days_diff <= 5:
-                            imminent_earn = True
-            except Exception:
-                pass
-
-        dist_21 = ((curr_p - ema21) / ema21) * 100.0
-        comp_tags = []
-        if is_compressed: comp_tags.append("📦 Sqz")
-        if vdu_pass: comp_tags.append("💧 VDU")
-        tag_str = f"[{' '.join(comp_tags)}]" if comp_tags else "[Normal]"
-        earn_tag = " ⚠️ EARN" if imminent_earn else ""
-
-        summary_lines.append(
-            f"• <b>{dr_sym}</b> (${curr_p:.2f}): RS vs {bench_sym} {composite_rs:+.1f}% | 21EMA {dist_21:+.1f}% | {tag_str}{earn_tag}"
-        )
-
-        recent_low = float(np.min(lows[-3:])) if len(lows) >= 3 else curr_p * 0.975
-        structural_stop = max(recent_low * 0.998, curr_p * 0.975)
-
-        within_ema_envelope = (-1.0 <= dist_21 <= 2.0)
-        base_quality_ok = is_compressed or vdu_pass
-
-        if within_ema_envelope and base_quality_ok and (not imminent_earn) and (composite_rs > 0) and risk_authorized and not vix_elevated:
-            candidates.append({
-                "dr": dr_sym,
-                "ticker": sym,
-                "tier": tier,
-                "bench": bench_sym,
-                "exchange": exchange,
-                "usd_price": curr_p,
-                "ratio": ratio,
-                "rs": composite_rs,
-                "dist_21": dist_21,
-                "stop_usd": structural_stop
-            })
-    except Exception as e:
-        print(f"Error {sym}: {e}")
-
-candidates.sort(key=lambda x: x["rs"], reverse=True)
-top_picks = candidates[:2]
-
-ticket_blocks = []
-settrade_copy_blocks = []
-has_executable_trade = False
-
-if top_picks and risk_authorized and r_thb > 0:
-    has_executable_trade = True
-    ticket_blocks.append("📋 <b>OPTIMIZED ALPHA TICKETS (THB Sized):</b>")
-    for p in top_picks:
-        entry_usd = p["usd_price"]
-        stop_usd = p["stop_usd"]
-        ratio = p["ratio"]
-        tier = p["tier"]
-
-        entry_thb = (entry_usd * usd_thb) / ratio
-        stop_thb = (stop_usd * usd_thb) / ratio
-        risk_per_unit = entry_thb - stop_thb
-
-        if risk_per_unit <= 0.001:
-            continue
-
-        raw_units = int(r_thb / risk_per_unit)
-        raw_outlay = raw_units * entry_thb
-        max_cap = 600000.0
-        if raw_outlay > max_cap:
-            units = int(max_cap / entry_thb)
-            capped_tag = " <i>(Capped at 20% Vault B)</i>"
-        else:
-            units = raw_units
-            capped_tag = ""
-
-        if tier == "HIGH_BETA":
-            t1_multiple = 2.0
-            t1_pct = 0.50
-            t1_tag = "+2.0R Volatility Target"
-        else:
-            t1_multiple = 1.5
-            t1_pct = 0.60
-            t1_tag = "+1.5R Core Bank"
-
-        target1_thb = entry_thb + (t1_multiple * risk_per_unit)
-        t1_units = int(units * t1_pct)
-        t2_units = units - t1_units
-        stop_pct = ((stop_usd - entry_usd) / entry_usd) * 100.0
-
-        ticket_card = (
-            f"🎯 <b>{p['dr']} ({p['ticker']}) - [{tier}] (vs {p['bench']}):</b>\n"
-            f"  • Entry: <b>฿{entry_thb:.2f}</b> (${entry_usd:.2f}) [21EMA: {p['dist_21']:+.1f}%]\n"
-            f"  • Hard Stop: <b>฿{stop_thb:.2f}</b> ({stop_pct:.1f}% pivot)\n"
-            f"  • Sizing: <b>{units:,} units</b> (Outlay: ฿{units*entry_thb:,.0f} THB){capped_tag}\n"
-            f"  • <b>T1 ({int(t1_pct*100)}% / {t1_units:,} u):</b> Limit <b>฿{target1_thb:.2f}</b> ({t1_tag} &gt;&gt; Move stop to BE)\n"
-            f"  • <b>T2 Runner ({int((1-t1_pct)*100)}% / {t2_units:,} u):</b> Trail Daily Close &ge; 21 EMA\n"
-            f"  • <b>⚡ Free-Roll Pyramiding:</b> On T1 hit, add <b>+{int(units*0.30):,} u</b> on next 15M breakout base (Stop @ BE)\n"
-            f"  • <b>🛡️ 4-Candle Stall Rule:</b> If 4x 15M candles stall without new highs, pull stop to <b>-0.5R (฿{entry_thb - (0.5*risk_per_unit):.2f})</b>\n"
-            f"  • <b>🛡️ LP Spread Guard:</b> Max Buy Limit = Offer + 1 tick. If Bid/Offer spread &gt; 0.4%, DO NOT CHASE.\n"
-            f"  • <b>Time-Stop:</b> Flatten if T1 unhit in 72 hours (3 sessions)\n"
-        )
-        ticket_blocks.append(ticket_card)
-
-        settrade_copy_blocks.append(
-            f"<code>BUY {p['dr']} @ ฿{entry_thb:.2f} | Vol: {units:,} | Stop: ฿{stop_thb:.2f}</code>"
-        )
-elif circuit_breaker_active:
-    ticket_blocks.append(f"⛔ <b>CIRCUIT BREAKER TRIGGERED:</b>\n• {circuit_reason}\n• All new buy orders suppressed.")
-elif vix_elevated:
-    ticket_blocks.append(f"⚠️ <b>VOLATILITY GATE ACTIVE:</b>\n• VIX at {vix_val:.1f} (&gt; 28.0). High-beta breakouts vetoed.")
-else:
-    ticket_blocks.append("📋 <b>EXECUTION:</b> Zero breakout setups qualified in launchpad envelope. Retain cash in SCB EZ / MMF.")
-
-lines = []
-if notice_header:
-    lines.append(notice_header)
-
-title_tag = "🚨 <b>[ACTION REQUIRED: US DRx ENTRY]</b>" if has_executable_trade else "🇺🇸 <b>[C2C Engine E - Dual-Vault Briefing]</b>"
-vix_icon = "🟢" if vix_val < 20 else ("🟡" if vix_val <= 28 else "🔴 HIGH")
-
-lines.extend([
-    title_tag,
-    f"📅 <b>Time:</b> {bkk_time_str} BKK",
-    f"💵 <b>USD/THB:</b> ฿{usd_thb:.2f} | <b>VIX:</b> {vix_val:.1f} [{vix_icon}]",
-    "━━━━━━━━━━━━━━━━━━",
-    f"📊 <b>MACRO REGIME:</b> {regime_icon} <b>{regime_name}</b>",
-    f"• <b>Risk Budget:</b> <b>{r_label}</b>",
-    f"• <b>Vault A Target:</b> <code>{vault_a_alloc}</code>",
-    f"• <b>Circuit Status:</b> Streak: <b>{win_streak}W</b> | Daily Stops: <b>{state.get('daily_stopouts', 0)}/2</b>",
-    "━━━━━━━━━━━━━━━━━━",
-    "🏛️ <b>CORE VAULT A & ETF MACRO STACK:</b>",
-    "\n".join(etf_monitor_lines) if etf_monitor_lines else "• ETF data pending",
-    "━━━━━━━━━━━━━━━━━━",
-    "🔍 <b>WATCHPOOL METRICS (Sector-Benchmarked RS):</b>",
-    "\n".join(summary_lines) if summary_lines else "• Data pending",
-    "━━━━━━━━━━━━━━━━━━"
-])
-lines.extend(ticket_blocks)
-
-if is_friday:
-    lines.extend([
-        "━━━━━━━━━━━━━━━━━━",
-        "🛡️ <b>FRIDAY OVERNIGHT COLLAR DIRECTIVE:</b>",
-        "• If T1 is not banked before market close, tighten stop to BE or flatten to eliminate unhedged weekend gap risk.",
-        "• If Net Long Exposure &gt; ฿1.5M and VIX &gt; 22, park hedge tranche in SGOV."
-    ])
-
-if settrade_copy_blocks:
-    lines.append("━━━━━━━━━━━━━━━━━━\n📲 <b>SETTRADE QUICK-PASTE:</b>")
-    lines.extend(settrade_copy_blocks)
-
-lines.append("━━━━━━━━━━━━━━━━━━\n<i>Automated pipeline running via GitHub Cloud.</i>")
-full_msg = "\n".join(lines)
-
-keyboard_buttons = [
-    [
-        {"text": "📲 Open InnovestX", "url": "https://play.google.com/store/apps/details?id=com.scbs.easyinvest"}
-    ],
-    [
-        {"text": "📈 SMH Chart", "url": "https://www.tradingview.com/chart/?symbol=NASDAQ%3ASMH"},
-        {"text": "📈 QQQM Chart", "url": "https://www.tradingview.com/chart/?symbol=NASDAQ%3AQQQM"},
-        {"text": "📈 VOO Chart", "url": "https://www.tradingview.com/chart/?symbol=AMEX%3AVOO"}
-    ]
-]
-
-keyboard = {"inline_keyboard": keyboard_buttons}
-
-print(f"Message length: {len(full_msg)} chars")
-if token and chat_id:
-    res = requests.post(
-        f"https://api.telegram.org/bot{token}/sendMessage",
-        json={
-            "chat_id": chat_id,
-            "text": full_msg,
-            "parse_mode": "HTML",
-            "disable_notification": False,
-            "reply_markup": keyboard
-        },
-        timeout=20
-    )
-    print(f"Telegram status: {res.status_code}")
-    if res.status_code != 200:
-        clean_plain = (
-            full_msg.replace("<b>", "")
-            .replace("</b>", "")
-            .replace("<code>", "")
-            .replace("</code>", "")
-            .replace("<i>", "")
-            .replace("</i>", "")
-            .replace("&gt;", ">")
-            .replace("&lt;", "<")
-        )
-        res_fb = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": clean_plain,
-                "disable_notification": False,
-                "reply_markup": keyboard
-            },
-            timeout=20
-        )
-        print(f"Fallback plain text status: {res_fb.status_code}")
-else:
-    print(f"Credentials missing. token={bool(token)}, chat_id={bool(chat_id)}")
+            vault_a_
