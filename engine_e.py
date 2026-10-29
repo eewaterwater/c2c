@@ -207,4 +207,8 @@ try:
             regime_icon = "🟠"
             r_thb = 15000.0 if vix_elevated else 22500.0
             r_label = "0.50R (฿15,000 THB) [VIX High]" if vix_elevated else "0.75R (฿22,500 THB)"
-            vault_a_
+            vault_a_alloc = "35% QQQ / 25% SMH / 40% SGOV"
+        else:
+            regime_id = 3
+            regime_name = "Regime 3: Rangebound Chop"
+            regime_icon = "🟡"
