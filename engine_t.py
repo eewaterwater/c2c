@@ -1,4 +1,3 @@
-```python
 #!/usr/bin/env python3
 import os, sys, datetime, pytz, requests, numpy as np, pandas as pd, yfinance as yf
 
@@ -76,7 +75,7 @@ def main():
         stop = round(lp - 0.2, 1)
         risk = round(entry - stop, 2)
         if 0.4 < risk <= MAX_RISK_PTS:
-            send_tg(f"🚨 <b>[ACTION REQUIRED: S50Z26 LONG ENTRY]</b>\n⏱ <i>{bkk_t} BKK</i>\n\n📋 <b>SETTRADE ONE-TAP EXECUTION:</b>\n<code>OPEN LONG S50Z26 @ {entry:.1f} | Vol: {DEFAULT_CONTRACTS} | Stop: {stop:.1f}</code>\n\n🎯 <b>BRACKET PROFILE ({DEFAULT_CONTRACTS} Contracts):</b>\n• <b>Limit Entry:</b> <b>{entry:.1f}</b>\n• <b>Hard Stop:</b> <code>{stop:.1f}</code> (-{risk:.1f} pts | Max Risk: ฿{int(risk*200*DEFAULT_CONTRACTS):,} THB)\n• <b>T1 Bank (6 cts):</b> {round(entry+3.5,1):.1f} (+3.5 pts >> BE)\n• <b>T2 Runner (4 cts):</b> {round(entry+7.0,1):.1f} (Trail EMA9)\n• <b>MA200:</b> {m200:.1f} 🟢 | <b>RSI:</b> {rsi:.1f}")
+            send_tg(f"🚨 <b>[ACTION REQUIRED: S50Z26 LONG ENTRY]</b>\n⏱ <i>{bkk_t} BKK</i>\n\n📋 <b>SETTRADE ONE-TAP EXECUTION:</b>\n<code>OPEN LONG S50Z26 @ {entry:.1f} | Vol: {DEFAULT_CONTRACTS} | Stop: {stop:.1f}</code>\n\n🎯 <b>BRACKET PROFILE ({DEFAULT_CONTRACTS} Contracts):</b>\n• <b>Limit Entry:</b> <b>{entry:.1f}</b>\n• <b>Hard Stop:</b> <code>{stop:.1f}</code> (-{risk:.1f} pts | Max Risk: ฿{int(risk*200*DEFAULT_CONTRACTS):,} THB)\n• <b>T1 Bank (6 cts):</b> {round(entry+3.5,1):.1f} (+3.5 pts >> BE)\n• <b>T2 Runner (40% / 4 cts):</b> {round(entry+7.0,1):.1f} (Trail EMA9)\n• <b>MA200:</b> {m200:.1f} 🟢 | <b>RSI:</b> {rsi:.1f}")
             return
         else:
             send_tg(f"⚪ <b>[C2C ENGINE T: TACTICAL MONITOR - STANDING ASIDE]</b>\n⏱ <i>{bkk_t} BKK</i>\n• <b>Veto:</b> Long stop {risk:.1f} pts exceeds {MAX_RISK_PTS} pt risk cap.")
@@ -88,7 +87,7 @@ def main():
         stop = round(hp + 0.2, 1)
         risk = round(stop - entry, 2)
         if 0.4 < risk <= MAX_RISK_PTS:
-            send_tg(f"🚨 <b>[ACTION REQUIRED: S50Z26 SHORT ENTRY]</b>\n⏱ <i>{bkk_t} BKK</i>\n\n📋 <b>SETTRADE ONE-TAP EXECUTION:</b>\n<code>OPEN SHORT S50Z26 @ {entry:.1f} | Vol: {DEFAULT_CONTRACTS} | Stop: {stop:.1f}</code>\n\n🎯 <b>BRACKET PROFILE ({DEFAULT_CONTRACTS} Contracts):</b>\n• <b>Limit Entry:</b> <b>{entry:.1f}</b>\n• <b>Hard Stop:</b> <code>{stop:.1f}</code> (+{risk:.1f} pts | Max Risk: ฿{int(risk*200*DEFAULT_CONTRACTS):,} THB)\n• <b>T1 Bank (6 cts):</b> {round(entry-3.5,1):.1f} (-3.5 pts >> BE)\n• <b>T2 Runner (4 cts):</b> {round(entry-7.0,1):.1f} (Trail EMA9)\n• <b>MA200:</b> {m200:.1f} 🔴 | <b>RSI:</b> {rsi:.1f}")
+            send_tg(f"🚨 <b>[ACTION REQUIRED: S50Z26 SHORT ENTRY]</b>\n⏱ <i>{bkk_t} BKK</i>\n\n📋 <b>SETTRADE ONE-TAP EXECUTION:</b>\n<code>OPEN SHORT S50Z26 @ {entry:.1f} | Vol: {DEFAULT_CONTRACTS} | Stop: {stop:.1f}</code>\n\n🎯 <b>BRACKET PROFILE ({DEFAULT_CONTRACTS} Contracts):</b>\n• <b>Limit Entry:</b> <b>{entry:.1f}</b>\n• <b>Hard Stop:</b> <code>{stop:.1f}</code> (+{risk:.1f} pts | Max Risk: ฿{int(risk*200*DEFAULT_CONTRACTS):,} THB)\n• <b>T1 Bank (6 cts):</b> {round(entry-3.5,1):.1f} (-3.5 pts >> BE)\n• <b>T2 Runner (40% / 4 cts):</b> {round(entry-7.0,1):.1f} (Trail EMA9)\n• <b>MA200:</b> {m200:.1f} 🔴 | <b>RSI:</b> {rsi:.1f}")
             return
         else:
             send_tg(f"⚪ <b>[C2C ENGINE T: TACTICAL MONITOR - STANDING ASIDE]</b>\n⏱ <i>{bkk_t} BKK</i>\n• <b>Veto:</b> Short stop {risk:.1f} pts exceeds {MAX_RISK_PTS} pt risk cap.")
