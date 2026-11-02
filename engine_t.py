@@ -2,11 +2,6 @@
 """
 Code2Cash Institutional Engine v7.2 - TFEX S50 15M Scanner
 Engine T: Dual-Timeframe Execution & Session Monitor
-
-Header Standards:
-- Actionable: 🚨 [ACTION REQUIRED: S50Z26 ENTRY]
-- Stand Aside: ⚪ [C2C ENGINE T: TACTICAL MONITOR - STANDING ASIDE]
-- Pre-Open:   🌅 [C2C ENGINE T: 09:45 AUCTION WICK PREP]
 """
 
 import os
@@ -18,56 +13,33 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
-# ==============================================================================
-# CONFIGURATION & CONSTANTS
-# ==============================================================================
 BKK_TZ = pytz.timezone('Asia/Bangkok')
-
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-MAX_RISK_PTS = 3.5           # Hard initial risk cap (Points)
-POINT_VALUE_THB = 200.0      # SET50 Index Futures multiplier (200 THB/pt)
-DEFAULT_CONTRACTS = 10       # Position sizing per 1R bracket
-ZOI_TOLERANCE_PTS = 1.5      # Distance threshold from EMA(20)
-MIN_WICK_PTS = 0.2           # Minimum wick rejection size
-MAX_ACCEPTABLE_SLIP = 0.8    # Max difference between live tick and limit entry
+MAX_RISK_PTS = 3.5
+POINT_VALUE_THB = 200.0
+DEFAULT_CONTRACTS = 10
+ZOI_TOLERANCE_PTS = 1.5
+MIN_WICK_PTS = 0.2
+MAX_ACCEPTABLE_SLIP = 0.8
 
-# ==============================================================================
-# TIMING & BLACKOUT CHECK (LAYER I)
-# ==============================================================================
 def check_execution_window(now_dt: datetime.datetime) -> tuple[bool, str]:
     t = now_dt.time()
-
-    # 1. Morning Auction Wick Prep (09:35 - 09:45)
     if datetime.time(9, 35) <= t < datetime.time(9, 45):
         return True, "WINDOW_AUCTION_PREP"
-
-    # 2. Opening Auction Blackout (09:45 - 10:15)
     if datetime.time(9, 45) <= t < datetime.time(10, 15):
         return False, "BLACKOUT_OPENING_AUCTION (09:45-10:15 BKK)"
-
-    # 3. Midday Lunch Blackout (12:15 - 14:15)
     if datetime.time(12, 15) <= t < datetime.time(14, 15):
         return False, "BLACKOUT_LUNCH_RECESS (12:15-14:15 BKK)"
-
-    # 4. Post-Market / Settlement Cutoff (>= 16:10 or before 09:35)
     if t >= datetime.time(16, 10) or t < datetime.time(9, 35):
         return False, "BLACKOUT_MARKET_CLOSED_OR_SETTLEMENT (>= 16:10 BKK)"
-
-    # 5. Active Morning Window
     if datetime.time(10, 15) <= t <= datetime.time(12, 0):
         return True, "WINDOW_MORNING_ACTIVE"
-
-    # 6. Active Afternoon Window
     if datetime.time(14, 15) <= t <= datetime.time(16, 10):
         return True, "WINDOW_AFTERNOON_ACTIVE"
-
     return False, "NON_EXECUTION_INTERVAL"
 
-# ==============================================================================
-# TECHNICAL INDICATORS
-# ==============================================================================
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df['ema_9'] = df['close'].ewm(span=9, adjust=False).mean()
@@ -85,9 +57,6 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df['body_size'] = (df['close'] - df['open']).abs()
     return df
 
-# ==============================================================================
-# TELEGRAM DISPATCHER
-# ==============================================================================
 def send_telegram_alert(message: str) -> bool:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("[WARN] Missing Telegram credentials. Console print:\n", message)
@@ -111,38 +80,17 @@ def send_telegram_alert(message: str) -> bool:
     }
     try:
         res = requests.post(url, json=payload, timeout=12)
+        print(f"Telegram status: {res.status_code}")
         return res.status_code == 200
     except Exception as e:
         print(f"[ERROR] Failed to send Telegram alert: {e}")
         return False
 
-# ==============================================================================
-# ALERT MESSAGE FORMATTERS
-# ==============================================================================
-def build_action_alert(
-    direction: str,
-    contract: str,
-    entry_price: float,
-    hard_stop: float,
-    risk_pts: float,
-    live_price: float,
-    ma_200: float,
-    ema_20: float,
-    rsi: float,
-    delta_decoupler: float,
-    now_bkk: datetime.datetime
-) -> str:
-    if direction == "LONG":
-        t1_price = round(entry_price + 3.5, 1)
-        t2_price = round(entry_price + 7.0, 1)
-        trend_status = f"BULLISH (Price {entry_price:.1f} > MA200 {ma_200:.1f}) 🟢"
-        stop_sign = f"-{risk_pts:.1f}"
-    else:
-        t1_price = round(entry_price - 3.5, 1)
-        t2_price = round(entry_price - 7.0, 1)
-        trend_status = f"BEARISH (Price {entry_price:.1f} < MA200 {ma_200:.1f}) 🔴"
-        stop_sign = f"+{risk_pts:.1f}"
-
+def build_action_alert(direction, contract, entry_price, hard_stop, risk_pts, live_price, ma_200, ema_20, rsi, delta_decoupler, now_bkk):
+    t1_price = round(entry_price + 3.5, 1) if direction == "LONG" else round(entry_price - 3.5, 1)
+    t2_price = round(entry_price + 7.0, 1) if direction == "LONG" else round(entry_price - 7.0, 1)
+    trend_status = f"BULLISH (Price {entry_price:.1f} > MA200 {ma_200:.1f}) 🟢" if direction == "LONG" else f"BEARISH (Price {entry_price:.1f} < MA200 {ma_200:.1f}) 🔴"
+    stop_sign = f"-{risk_pts:.1f}" if direction == "LONG" else f"+{risk_pts:.1f}"
     risk_thb = int(risk_pts * POINT_VALUE_THB * DEFAULT_CONTRACTS)
     zoi_dist = round(abs(entry_price - ema_20), 1)
     slip_diff = round(abs(live_price - entry_price), 1)
@@ -169,17 +117,7 @@ def build_action_alert(
         "<i>Code2Cash Institutional Engine v7.2</i>"
     )
 
-def build_monitor_alert(
-    contract: str,
-    live_price: float,
-    closed_price: float,
-    ma_200: float,
-    ema_20: float,
-    rsi: float,
-    delta_decoupler: float,
-    veto_reason: str,
-    now_bkk: datetime.datetime
-) -> str:
+def build_monitor_alert(contract, live_price, closed_price, ma_200, ema_20, rsi, delta_decoupler, veto_reason, now_bkk):
     trend_tag = "🟢 Above MA200" if closed_price >= ma_200 else "🔴 Below MA200"
     delta_flag = "⚠️ DECOUPLED" if abs(delta_decoupler) > 1.5 else "✅ Normal"
 
@@ -195,15 +133,12 @@ def build_monitor_alert(
         f"• <b>DELTA Decoupler:</b> <code>{delta_decoupler:+.2f}%</code> ({delta_flag})\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"📋 <b>EXECUTION:</b> <b>Standing Aside.</b>\n"
-        f"• Filter Status: <i>{veto_reason}</i>\n"
+        f"• Status: <i>{veto_reason}</i>\n"
         "• Capital preserved in Cash Hold.\n"
         "━━━━━━━━━━━━━━━━━━\n"
         "<i>Code2Cash Institutional Engine v7.2</i>"
     )
 
-# ==============================================================================
-# DATA INGESTION HELPERS
-# ==============================================================================
 def fetch_clean_df(ticker_sym: str, period: str = "1mo", interval: str = "1d") -> pd.DataFrame:
     try:
         df = yf.download(ticker_sym, period=period, interval=interval, progress=False)
@@ -214,24 +149,20 @@ def fetch_clean_df(ticker_sym: str, period: str = "1mo", interval: str = "1d") -
         df.columns = [str(c).lower() for c in df.columns]
         return df.dropna(subset=["close", "high", "low", "open"])
     except Exception as e:
-        print(f"[WARN] Fetch error for {ticker_sym} ({interval}): {e}")
+        print(f"[WARN] Fetch error {ticker_sym}: {e}")
         return pd.DataFrame()
 
-# ==============================================================================
-# MAIN SCANNER & EVALUATION PIPELINE
-# ==============================================================================
 def main():
     now_bkk = datetime.datetime.now(BKK_TZ)
     bkk_time_str = now_bkk.strftime("%Y-%m-%d %H:%M:%S")
-    today_date = now_bkk.date()
+    is_manual = os.getenv("GITHUB_EVENT_NAME") == "workflow_dispatch"
 
-    # Gate 1: Check Execution Window
     is_valid_window, window_status = check_execution_window(now_bkk)
-    if not is_valid_window:
-        print(f"[{now_bkk.strftime('%H:%M:%S')}] Gate 1 Veto: {window_status}")
+    if not is_valid_window and not is_manual:
+        print(f"Gate 1 Veto: {window_status}")
         return
 
-    # 1. Fetch Daily Underlyings
+    # 1. Fetch Underlyings
     df_daily = fetch_clean_df("^SET50.BK", period="1mo", interval="1d")
     active_ticker = "^SET50.BK"
     if df_daily.empty:
@@ -241,66 +172,76 @@ def main():
     pdc, pdh, pdl = 0.0, 0.0, 0.0
     if not df_daily.empty:
         prev_row = df_daily.iloc[-2] if len(df_daily) >= 2 else df_daily.iloc[-1]
-        pdc = float(prev_row["close"])
-        pdh = float(prev_row["high"])
-        pdl = float(prev_row["low"])
-
-    if pdh <= pdl or pdh == pdc:
-        pdh = round(pdc + 4.20, 2)
-        pdl = round(pdc - 4.80, 2)
-
+        pdc, pdh, pdl = float(prev_row["close"]), float(prev_row["high"]), float(prev_row["low"])
     poc_est = round((pdh + pdl + pdc) / 3.0, 2)
-    vah_est = pdh
-    val_est = pdl
+    vah_est, val_est = pdh, pdl
 
-    # 2. Check DELTA Decoupler
+    # 2. DELTA Decoupler
     delta_pct = 0.0
     try:
         df_del = fetch_clean_df("DELTA.BK", period="5d", interval="1d")
         if len(df_del) >= 2:
             delta_pct = ((float(df_del["close"].iloc[-1]) - float(df_del["close"].iloc[-2])) / float(df_del["close"].iloc[-2])) * 100.0
-    except Exception as e:
-        print(f"[WARN] Failed fetching DELTA.BK: {e}")
+    except Exception: pass
 
-    # ==========================================================================
-    # BRANCH A: 09:35 PRE-OPEN AUCTION WICK PREP
-    # ==========================================================================
-    if window_status == "WINDOW_AUCTION_PREP":
-        delta_flag = "⚠️ DECOUPLED" if abs(delta_pct) >= 1.5 else "✅ Normal"
-        auction_msg = (
-            "🌅 <b>[C2C ENGINE T: 09:45 AUCTION WICK PREP]</b>\n"
-            f"⏱ <i>{bkk_time_str} BKK</i>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            f"• <b>Contract:</b> <code>S50Z26 (Index: {active_ticker})</code>\n"
-            f"• <b>Prior Close (PDC):</b> <code>{pdc:.2f} pts</code>\n"
-            f"• <b>Prior High (VAH):</b> <code>{vah_est:.2f} pts</code>\n"
-            f"• <b>Prior Low (VAL):</b> <code>{val_est:.2f} pts</code>\n"
-            f"• <b>Estimated POC:</b> <code>{poc_est:.2f} pts</code>\n"
-            f"• <b>DELTA Decoupler:</b> <code>{delta_pct:+.2f}%</code> ({delta_flag})\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            "🎯 <b>AUCTION WICK LIMIT LEVELS (09:45–10:00 BKK):</b>\n"
-            f"• <b>Long Wick Fade:</b> Limit Buy at <b>{val_est:.1f}</b> | Stop: {val_est - 2.5:.1f} (-2.5 pts)\n"
-            f"• <b>Short Wick Fade:</b> Limit Short at <b>{vah_est:.1f}</b> | Stop: {vah_est + 2.5:.1f} (+2.5 pts)\n"
-            "• <b>Rule:</b> Target +2.0 to +3.0 pts bounce. <b>At 09:58 BKK, bank or pull stop to BE before cash open!</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            "<i>Code2Cash Institutional Engine v7.2</i>"
-        )
-        send_telegram_alert(auction_msg)
-        return
-
-    # ==========================================================================
-    # BRANCH B: ACTIVE 15M EXECUTION & MONITORING WINDOWS
-    # ==========================================================================
+    # 3. 15M Data
     df_15m = fetch_clean_df("^SET50.BK", period="1mo", interval="15m")
     if df_15m.empty:
         df_15m = fetch_clean_df("^SET50", period="1mo", interval="15m")
 
-    if len(df_15m) < 200:
-        print(f"[{now_bkk.strftime('%H:%M:%S')}] Insufficient 15M bars ({len(df_15m)}/200).")
+    if len(df_15m) < 20:
+        msg = f"⚪ <b>[C2C ENGINE T: STANDING ASIDE]</b>\n⏱ <i>{bkk_time_str} BKK</i>\n• SET50 15M feed initializing ({len(df_15m)} bars available).\n• Cash Hold active."
+        send_telegram_alert(msg)
         return
 
     df_15m = calculate_indicators(df_15m)
-
-    # Live tick vs Closed bar (iloc[-2] is verified closed bar)
     live_price = float(df_15m["close"].iloc[-1])
-    closed_bar = df_1
+    closed_bar = df_15m.iloc[-2] if len(df_15m) >= 2 else df_15m.iloc[-1]
+
+    close_p = float(closed_bar['close'])
+    high_p = float(closed_bar['high'])
+    low_p = float(closed_bar['low'])
+    open_p = float(closed_bar['open'])
+    ema_20 = float(closed_bar['ema_20']) if not np.isnan(closed_bar['ema_20']) else close_p
+    ma_200 = float(closed_bar['ma_200']) if not np.isnan(closed_bar['ma_200']) else float(df_15m['close'].mean())
+    rsi = float(closed_bar['rsi_14']) if not np.isnan(closed_bar['rsi_14']) else 50.0
+    lower_wick = float(closed_bar['lower_wick'])
+    upper_wick = float(closed_bar['upper_wick'])
+
+    if abs(delta_pct) > 1.5:
+        veto_reason = f"DELTA Decoupled ({delta_pct:+.2f}%) exceeds ±1.5% threshold."
+        send_telegram_alert(build_monitor_alert("S50Z26", live_price, close_p, ma_200, ema_20, rsi, delta_pct, veto_reason, now_bkk))
+        return
+
+    # Check Long
+    if close_p > ma_200 and abs(close_p - ema_20) <= ZOI_TOLERANCE_PTS:
+        if lower_wick >= MIN_WICK_PTS and close_p >= open_p and (52.0 <= rsi <= 70.0):
+            entry_price = round((open_p + close_p) / 2.0, 1)
+            raw_stop = round(low_p - 0.2, 1)
+            risk_pts = round(entry_price - raw_stop, 2)
+            if 0.4 < risk_pts <= MAX_RISK_PTS:
+                send_telegram_alert(build_action_alert("LONG", "S50Z26", entry_price, raw_stop, risk_pts, live_price, ma_200, ema_20, rsi, delta_pct, now_bkk))
+                return
+            else:
+                veto_reason = f"Long stop ({risk_pts:.1f} pts) violates ≤ {MAX_RISK_PTS} pt cap."
+                send_telegram_alert(build_monitor_alert("S50Z26", live_price, close_p, ma_200, ema_20, rsi, delta_pct, veto_reason, now_bkk))
+                return
+
+    # Check Short
+    if close_p < ma_200 and abs(close_p - ema_20) <= ZOI_TOLERANCE_PTS:
+        if upper_wick >= MIN_WICK_PTS and close_p <= open_p and (30.0 <= rsi <= 48.0):
+            entry_price = round((open_p + close_p) / 2.0, 1)
+            raw_stop = round(high_p + 0.2, 1)
+            risk_pts = round(raw_stop - entry_price, 2)
+            if 0.4 < risk_pts <= MAX_RISK_PTS:
+                send_telegram_alert(build_action_alert("SHORT", "S50Z26", entry_price, raw_stop, risk_pts, live_price, ma_200, ema_20, rsi, delta_pct, now_bkk))
+                return
+            else:
+                veto_reason = f"Short stop ({risk_pts:.1f} pts) violates ≤ {MAX_RISK_PTS} pt cap."
+                send_telegram_alert(build_monitor_alert("S50Z26", live_price, close_p, ma_200, ema_20, rsi, delta_pct, veto_reason, now_bkk))
+                return
+
+    # Stand-Aside Dispatch
+    dist_zoi = abs(close_p - ema_20)
+    if dist_zoi > ZOI_TOLERANCE_PTS:
+        veto_reason = f"Price extended {dist
