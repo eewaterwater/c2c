@@ -2,10 +2,9 @@ name: "C2C Engine T - Systematic Execution (v7.5)"
 
 on:
   schedule:
-    # Runs during TFEX regular trading hours (Monday to Friday)
-    # Thailand is UTC+7 (BKK). 
-    # Morning Session: 09:45 - 12:30 BKK  -->  02:45 - 05:30 UTC
-    # Afternoon Session: 14:15 - 16:55 BKK --> 07:15 - 09:55 UTC
+    # TFEX Regular Trading Hours (Monday to Friday, BKK Time UTC+7)
+    # Morning: 09:45 - 12:30 BKK  -->  02:45 - 05:30 UTC
+    # Afternoon: 14:15 - 16:55 BKK --> 07:15 - 09:55 UTC
     - cron: '*/15 2-5 * * 1-5'
     - cron: '*/15 7-9 * * 1-5'
   workflow_dispatch:
@@ -44,7 +43,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
       - name: "Install Core Quantitative Dependencies"
         run: |
@@ -82,7 +80,6 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git status --porcelain
           if [[ -n $(git status --porcelain state/ logs/) ]]; then
             git add state/ logs/ || true
             git commit -m "chore(engine_t): sync trade state and execution logs [skip ci]" || true
