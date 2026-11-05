@@ -1,53 +1,73 @@
-name: C2C Engine T (TFEX S50 Scanner)
+---
+name: tfex-swing-playbook
+description: Guide and manage disciplined systematic swing and trend-following trading for TFEX SET50 Index Futures (S50) using the Code2Cash v7.5 Institutional Engine. Features dual-timeframe execution (2H Anchor + 15M MSS Trigger), Auction Market Theory Value Area filters, DELTA Decoupler & Basis Clamping gates, dynamic microstructure-pegged ATR brackets (Prior Swing Pivot ± 0.2 pt front-run T1), 60-Minute Time-Stop Invariant, mandatory Stop-Market (MP) routing, House Money Pyramiding, 20-contract liquidity caps, and weekly yield sweeper protocols.
+---
 
-on:
-  schedule:
-    - cron: '35 02 * * 1-5'   # 09:35 BKK - Morning Auction Wick Prep
-    - cron: '15 03 * * 1-5'   # 10:15 BKK - Morning Session 15M MSS Trigger
-    - cron: '45 06 * * 1-5'   # 13:45 BKK - Afternoon Session Alignment
-    - cron: '15 09 * * 1-5'   # 16:15 BKK - Friday Flatten Hook & Daily Audit
-  workflow_dispatch:
-    inputs:
-      action:
-        description: 'Manual Trigger Mode (scan, update)'
-        required: false
-        default: 'scan'
+# TFEX S50 Code2Cash Institutional Playbook (v7.5)
 
-permissions:
-  contents: write
+A production-grade systematic trading engine specification for Thailand Futures Exchange (TFEX) SET50 Index Futures (S50).
 
-jobs:
-  scan-tfex:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
+## 1. Instrument Specifications & Capital Footprint
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+* **Instrument Multiplier:** ฿200 THB per index point ($0.1\text{ pt tick} = ฿20\text{ THB}$).
+* **Exchange Friction:** ฿80 round-turn commission per contract.
+* **Capital Base (Tier 1):** ฿800,000 THB working equity (Baseline footprint: 10 Contracts split `7 Bank (T1) / 3 Runner (T2)`).
+* **Capital Tier 2 (Apex Tier):** ฿1,000,000 THB working equity (10 Contracts).
+* **Execution Footprint Cap:** Capped strictly at 20 Contracts (฿2,000,000 THB working equity: `14 Bank / 6 Runner`) to eliminate order book market impact.
+* **Weekly Profit Sweeper:** Every Friday at 17:00 BKK, sweep 100% of realized profits above the baseline into a 4.5% p.a. defensive cash yield / dividend portfolio.
 
-      - name: Install Dependencies
-        run: |
-          pip install yfinance pandas numpy requests pytz exchange_calendars
+## 2. Multi-Timeframe Architecture & Entry Mechanics
 
-      - name: Execute Engine T
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python engine_t.py
+### Layer A: Macro Directional Gate (Daily Chart)
+* **Long Regime:** Daily Close > EMA(20) AND Daily Close > SMA(200) with 3-day EMA slope $\ge 0.80\text{ pts}$.
+* **Short Regime:** Daily Close < EMA(20) AND Daily Close < SMA(200) with 3-day EMA slope $\ge 0.80\text{ pts}$.
+* **ADX Filter:** Daily ADX(14) > 20.0 with aligned directional indicator (+DI / -DI).
 
-      - name: Auto-Commit Persistent State
-        run: |
-          git config --global user.name "C2C State Engine"
-          git config --global user.email "bot@code2cash.internal"
-          git add state.json
-          if ! git diff --staged --quiet; then
-            git commit -m "chore: persist engine_t state [skip ci]"
-            git pull --rebase origin main
-            git push origin main
-          fi
+### Layer B: 2-Hour Structure & Auction Market Filter
+* **Zone of Interest (ZOI):** Price enters within $\pm 1.5\text{ pts}$ of the 2H EMA(20).
+* **Prior-Day Value Area (VAH/VAL):** Requires acceptance outside yesterday's 70% volume distribution (at least 2 consecutive 15M candle closes above VAH for Longs, or below VAL for Shorts). Entries inside fair value are vetoed.
+
+### Layer C: 15-Minute Market Structure Shift (MSS) Trigger & Pullback Rule
+* **No Extension Chasing:** Never short when price is extended $> 2.0\text{ pts}$ below 15M EMA(9), and never buy when extended $> 2.0\text{ pts}$ above.
+* **Bullish MSS:** 15M close > 15M EMA(20) & 15M MA(200) with bottom wick > 0.2 pts and 15M RSI(14) > 52.
+* **Bearish MSS:** 15M close < 15M EMA(20) & 15M MA(200) with upper wick > 0.2 pts and 15M RSI(14) < 48.
+
+### Layer D: Institutional Execution Windows
+* **Authorized Entry Windows:** 10:15–11:45 BKK (Morning) and 14:15–15:30 BKK (Afternoon).
+* **Blackout / Execution Freeze Periods:**
+  * 09:45–10:15 (Opening auction volatility).
+  * 11:45–14:15 (Midday low-liquidity churn and lunch halt).
+  * After 15:45 (Pre-close volatility & overnight gap risk).
+
+## 3. Institutional Intermarket & Basis Gates
+
+* **DELTA Decoupler:** If DELTA moves $> 1.5\%$ against trade direction, veto setup unconditionally.
+* **Futures Basis Clamping:** Long entries vetoed if Basis $\ge +5.5\text{ pts}$ premium; Short entries vetoed if Basis $\le -3.5\text{ pts}$ discount.
+* **Mega-Cap Breadth:** Top 5 stocks (DELTA, PTT, PTTEP, CPALL, BDMS) must have $\ge 3/5$ directional alignment.
+* **Asian Delta & FX:** Asian E-mini S&P futures delta must not oppose trade by $\ge 0.6\%$; USD/THB 5-day slope must align with trade direction.
+
+## 4. Bracket Order Lifecycle & Microstructure Profit-Taking (v7.5)
+
+### Invalidation & Hard Stop Routing (Mandatory Stop-Market)
+* **Initial Structural Stop:** $\min(|\text{Entry} - \text{15M Swing Pivot}| + 0.3, 3.5\text{ pts})$.
+* **Hard Stop Cap:** Strictly $\le 3.5\text{ pts}$ max ($< 1.0\%$ equity risk on ฿800k base).
+* **Streaming Routing Requirement:** Stop orders MUST be placed using **Price: MP (Market Price)** conditional stops. Never use Stop-Limit prices to eliminate execution skipping during rapid market moves.
+
+### Tranche 1 (Bank Target - 70% Volume / 7 Contracts)
+* **Pivot Front-Run Rule:** Never use static point numbers that fall beyond key structural shelves or round numbers.
+  * **Short Target:** Set limit at $\text{Prior 15M/5M Swing Low Wick} + 0.2\text{ pt}$ (front-running iceberg bids).
+  * **Long Target:** Set limit at $\text{Prior 15M/5M Swing High Wick} - 0.2\text{ pt}$ (front-running iceberg offers).
+* **Immediate Breakeven Trigger:** The exact second T1 matches, immediately edit the Stop Order on the remaining 3 contracts to **Entry (0.0 pts Breakeven)** and cancel all obsolete limit orders.
+
+### Tranche 2 (Runner - 30% Volume / 3 Contracts)
+* **Dynamic EMA Trail:** Trail stop behind the trailing **15M EMA(9)** close for shorts (or trailing swing pivot for longs).
+* **Runner Target Shelf:** Secondary macro shelf (e.g. multi-day liquidity pool or 2H ATR projection).
+
+### The 60-Minute Time-Stop Invariant
+* If an active position fails to hit T1 within **4 consecutive 15-minute bars (60 minutes)** from entry and compresses into inside-range chop, **scratch the trade flat at Market/Breakeven ($\pm 0.3\text{ pt}$)**. Never sit through midday dead-zone churn hoping for a fill.
+
+## 5. Risk Guardrails & Circuit Breakers
+
+* **Daily Lockout:** 2 consecutive stop-outs in a single day ($\ge -5.0\text{ to } -7.0\text{ pts}$ cumulative) $\rightarrow$ Cease trading until 08:30 next morning.
+* **Weekly Lockout:** 3 stop-outs in a calendar week $\rightarrow$ Cease trading until Monday 08:30.
+* **Intraday Closing Flatten (Zero Naked Overnight Risk):** On any day where T1 has not banked before 16:00 BKK, flatten 100% of open contracts at market before 16:10. Zero unbracketed overnight positions allowed.
