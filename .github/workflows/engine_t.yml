@@ -1,89 +1,40 @@
-name: "C2C Engine T - Systematic Execution (v7.5)"
+name: Code2Cash v7.6 S50 & DR Alert Engine
 
 on:
-  schedule:
-    # TFEX Regular Trading Hours (Monday to Friday, BKK Time UTC+7)
-    # Morning: 09:45 - 12:30 BKK  -->  02:45 - 05:30 UTC
-    # Afternoon: 14:15 - 16:55 BKK --> 07:15 - 09:55 UTC
-    - cron: '*/15 2-5 * * 1-5'
-    - cron: '*/15 7-9 * * 1-5'
   workflow_dispatch:
-    inputs:
-      force_mode:
-        description: 'Execution override mode'
-        required: false
-        default: 'AUTO'
-        type: choice
-        options:
-          - AUTO
-          - FORCE_FLATTEN
-          - DRY_RUN
-
-permissions:
-  contents: write
-  actions: read
-
-concurrency:
-  group: engine-t-execution
-  cancel-in-progress: false
+  schedule:
+    # 07:50 BKK (00:50 UTC) — Nov 16, 2026 DR Early Session Pre-Open Gate
+    - cron: '50 0 * * 1-5'
+    # 10:15–11:45 BKK (03:15–04:45 UTC) — Morning TFEX 15M Windows
+    - cron: '15,30,45 3 * * 1-5'
+    - cron: '0,15,30,45 4 * * 1-5'
+    # 12:25 BKK (05:25 UTC) — Pre-Lunch Flatten Gate
+    - cron: '25 5 * * 1-5'
+    # 14:15–15:30 BKK (07:15–08:30 UTC) — Afternoon TFEX 15M Windows
+    - cron: '15,30,45 7 * * 1-5'
+    - cron: '0,15,30 8 * * 1-5'
+    # 15:58 BKK (08:58 UTC) — Mandatory EOD Flatten Gate
+    - cron: '58 8 * * 1-5'
 
 jobs:
-  execute-engine-t:
-    name: "Run Engine T (v7.5 Invariant)"
+  run-engine:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-
     steps:
-      - name: "Checkout Repository"
+      - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
-      - name: "Set up Python 3.11"
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
-      - name: "Install Core Quantitative Dependencies"
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-             pip install -r requirements.txt
-          else
-             pip install pandas numpy requests python-telegram-bot
-          fi
+          pip install pandas numpy requests pytz
 
-      - name: "Audit Execution Environment & Timezone"
-        run: |
-          sudo timedatectl set-timezone Asia/Bangkok
-          echo "System Time (BKK): $(date '+%Y-%m-%d %H:%M:%S %Z')"
-
-      - name: "Execute Engine T Cycle"
+      - name: Execute Code2Cash v7.6 Engine
         env:
-          TFEX_BROKER_USER: ${{ secrets.TFEX_BROKER_USER }}
-          TFEX_BROKER_PIN: ${{ secrets.TFEX_BROKER_PIN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          FORCE_MODE: ${{ github.event.inputs.force_mode || 'AUTO' }}
-        run: |
-          if [ -f "engine_t.py" ]; then
-            python engine_t.py
-          elif [ -f "src/engine_t.py" ]; then
-            python src/engine_t.py
-          else
-            echo "::error::engine_t.py not found in root or src/ directory."
-            exit 1
-          fi
-
-      - name: "Persist Trade State & Logs"
-        if: always()
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          if [[ -n $(git status --porcelain state/ logs/) ]]; then
-            git add state/ logs/ || true
-            git commit -m "chore(engine_t): sync trade state and execution logs [skip ci]" || true
-            git push origin main || true
-          else
-            echo "No trade state or log changes to commit."
-          fi
+        run: python engine_t.py
