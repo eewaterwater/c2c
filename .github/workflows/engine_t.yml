@@ -1,4 +1,4 @@
-name: Code2Cash v7.6 S50 & DR Alert Engine
+name: C2C Engine T (TFEX S50 v7.6)
 
 on:
   workflow_dispatch:
