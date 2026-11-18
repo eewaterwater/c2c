@@ -1,40 +1,33 @@
-name: C2C Engine T (TFEX S50 v7.6)
+name: Code2Cash v7.7 — Engine T (TFEX S50)
 
 on:
-  workflow_dispatch:
   schedule:
-    # 07:50 BKK (00:50 UTC) — Nov 16, 2026 DR Early Session Pre-Open Gate
-    - cron: '50 0 * * 1-5'
-    # 10:15–11:45 BKK (03:15–04:45 UTC) — Morning TFEX 15M Windows
+    # Runs every 15 minutes during Thai market hours (03:15–08:45 UTC = 10:15–15:45 BKK)
     - cron: '15,30,45 3 * * 1-5'
     - cron: '0,15,30,45 4 * * 1-5'
-    # 12:25 BKK (05:25 UTC) — Pre-Lunch Flatten Gate
-    - cron: '25 5 * * 1-5'
-    # 14:15–15:30 BKK (07:15–08:30 UTC) — Afternoon TFEX 15M Windows
     - cron: '15,30,45 7 * * 1-5'
     - cron: '0,15,30 8 * * 1-5'
-    # 15:58 BKK (08:58 UTC) — Mandatory EOD Flatten Gate
-    - cron: '58 8 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      morning_realized_thb:
+        description: 'Morning gross realized P/L in THB (e.g. 3260)'
+        required: false
+        default: '0'
 
 jobs:
-  run-engine:
+  scan-tfex:
     runs-on: ubuntu-latest
+    env:
+      ENGINE_VERSION: "Code2Cash v7.7"
+      MORNING_REALIZED_THB: ${{ github.event.inputs.morning_realized_thb || '0' }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pandas numpy requests pytz
-
-      - name: Execute Code2Cash v7.6 Engine
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run Code2Cash Engine T (v7.7)
         run: python engine_t.py
