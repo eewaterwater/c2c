@@ -1,3 +1,11 @@
+### Changelog
+- **v7.7 (Nov 18, 2026):**
+  - Added **Regime-Based Sizing (`TREND_BREAKOUT` vs. `RANGE_BOX`)**: deploys `10` lots AM / `6` lots PM (`7/2/1` or `4/1/1`) outside `VAH/VAL` or on `>= 6.0 pt` directional days, and drops to `4` lots (`100%` all-out at `+2.8 pts`) inside narrow ranges—cutting annual round-turn fee drag from `฿208k` to `฿124k` in backtests.
+  - Added **Morning One-and-Done Gate (`>= +฿3,000 THB` gross)** before `11:00 BKK` and `>= +฿5,000 THB` full-day lockout.
+  - Added **Settrade Streaming `Av.Vol` Unblocked Stop Rule** so resting T2 limit orders never block single-block conditional `MP-MKT` stops.
+
+
+
 # Code2Cash (C2C) Execution Framework
 
 Systematic semi-automated trading engines running via GitHub Actions, monitored via Telegram, and executed via InnovestX / TradingView.
