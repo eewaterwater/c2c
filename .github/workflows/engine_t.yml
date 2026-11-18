@@ -28,6 +28,6 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install --upgrade pip && pip install pytz requests yfinance pandas
       - name: Run Code2Cash Engine T (v7.7)
         run: python engine_t.py
